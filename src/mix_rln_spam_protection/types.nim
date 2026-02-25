@@ -82,21 +82,6 @@ type
     Spam ## Spam detected (double signaling)
     Duplicate ## Duplicate message (same proof seen before)
 
-  # Membership update actions
-  MembershipAction* = enum
-    ## Action type for membership updates.
-    Add
-    Remove
-
-  # Membership update message (for coordination layer)
-  # Similar to waku-rln-relay's approach: send idCommitment + userMessageLimit
-  # so receivers can both compute the tree leaf AND track idCommitment for spam recovery
-  MembershipUpdate* = object ## Message broadcast on membership content topic.
-    action*: MembershipAction
-    idCommitment*: IDCommitment ## Identity commitment (for spam recovery)
-    userMessageLimit*: uint64 ## Rate limit for this member
-    index*: MembershipIndex
-
   # Proof metadata broadcast message (for coordination layer)
   ProofMetadataBroadcast* = object ## Message broadcast on proof metadata content topic.
     nullifier*: Nullifier
@@ -141,6 +126,27 @@ type
     Syncing ## Waiting for initial membership sync
     Ready ## Plugin is ready for proof generation/verification
     Stopped ## Plugin has been stopped
+
+  # External Merkle proof (returned by external service)
+  ExternalMerkleProof* = object
+    ## Merkle proof data obtained from an external service.
+    ## Used by GroupManager to generate RLN proofs without a local tree.
+    pathElements*: seq[byte] ## Concatenated 32-byte sibling hashes, leaf-to-root
+    identityPathIndex*: seq[byte] ## Direction bits (0=left, 1=right) through tree
+    root*: MerkleNode ## Merkle root at time of proof generation
+
+  # Callbacks for external Merkle proof service (transport-agnostic)
+  FetchMerkleProofCallback* =
+    proc(index: MembershipIndex): Future[RlnResult[ExternalMerkleProof]] {.
+      gcsafe, raises: []
+    .}
+    ## Fetch the Merkle proof for a member at the given index.
+    ## Corresponds to JSON-RPC method rln_getMerkleProof.
+
+  FetchLatestRootsCallback* =
+    proc(): Future[RlnResult[seq[MerkleNode]]] {.gcsafe, raises: [].}
+    ## Fetch the latest valid Merkle roots from the external service.
+    ## Returns 1–5 roots newest first. Corresponds to JSON-RPC method rln_getRoots.
 
 # =============================================================================
 # Epoch Calculation

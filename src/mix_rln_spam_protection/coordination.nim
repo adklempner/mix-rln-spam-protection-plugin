@@ -5,7 +5,7 @@
 ## Coordination layer for RLN spam protection.
 ##
 ## This module provides utilities for integrating with logos-messaging
-## to broadcast membership updates and proof metadata across the network.
+## to broadcast proof metadata across the network.
 
 import std/[options]
 import chronos
@@ -24,7 +24,6 @@ logScope:
 
 type
   # Subscription handler types
-  MembershipSubscriptionHandler* = proc(update: MembershipUpdate) {.gcsafe, raises: [].}
   MetadataSubscriptionHandler* = proc(metadata: ProofMetadataBroadcast) {.gcsafe, raises: [].}
 
   # Coordination layer wrapper
@@ -32,11 +31,10 @@ type
     ## Wrapper for coordinating RLN spam protection with logos-messaging.
     ##
     ## This provides a clean interface for:
-    ## - Publishing membership updates and proof metadata
-    ## - Subscribing to these topics and routing to the spam protection plugin
+    ## - Publishing proof metadata
+    ## - Subscribing to proof metadata topics and routing to the spam protection plugin
     spamProtection: MixRlnSpamProtection
     publishCallback: Option[PublishCallback]
-    onMembershipUpdate: Option[MembershipSubscriptionHandler]
     onProofMetadata: Option[MetadataSubscriptionHandler]
 
 proc newCoordinationLayer*(spamProtection: MixRlnSpamProtection): CoordinationLayer =
@@ -44,7 +42,6 @@ proc newCoordinationLayer*(spamProtection: MixRlnSpamProtection): CoordinationLa
   CoordinationLayer(
     spamProtection: spamProtection,
     publishCallback: none(PublishCallback),
-    onMembershipUpdate: none(MembershipSubscriptionHandler),
     onProofMetadata: none(MetadataSubscriptionHandler)
   )
 
@@ -53,10 +50,6 @@ proc setPublishCallback*(cl: CoordinationLayer, callback: PublishCallback) =
   ## This should be wired to logos-messaging's publish function.
   cl.publishCallback = some(callback)
   cl.spamProtection.setPublishCallback(callback)
-
-proc setMembershipUpdateHandler*(cl: CoordinationLayer, handler: MembershipSubscriptionHandler) =
-  ## Set additional handler for membership updates (for custom processing).
-  cl.onMembershipUpdate = some(handler)
 
 proc setProofMetadataHandler*(cl: CoordinationLayer, handler: MetadataSubscriptionHandler) =
   ## Set additional handler for proof metadata (for custom processing).
@@ -71,22 +64,9 @@ proc handleIncomingMessage*(
   ##
   ## This should be called when messages are received on the RLN content topics.
 
-  let membershipTopic = cl.spamProtection.getMembershipContentTopic()
   let metadataTopic = cl.spamProtection.getProofMetadataContentTopic()
 
-  if contentTopic == membershipTopic:
-    # Handle membership update
-    let handleResult = await cl.spamProtection.handleMembershipUpdate(data)
-    if handleResult.isErr:
-      return err("Failed to handle membership update: " & handleResult.error)
-
-    # Call additional handler if set
-    if cl.onMembershipUpdate.isSome:
-      let update = MembershipUpdate.decode(data).valueOr:
-        return err("Failed to decode update for handler: " & $error)
-      cl.onMembershipUpdate.get()(update)
-
-  elif contentTopic == metadataTopic:
+  if contentTopic == metadataTopic:
     # Handle proof metadata
     let metadataResult = cl.spamProtection.handleProofMetadata(data)
     if metadataResult.isErr:
@@ -109,14 +89,13 @@ proc getContentTopics*(cl: CoordinationLayer): seq[string] =
 
 proc getDefaultContentTopics*(): seq[string] =
   ## Get the default content topics (for reference).
-  @[MembershipContentTopic, ProofMetadataContentTopic]
+  @[ProofMetadataContentTopic]
 
 # Helper function for building a logos-messaging subscription filter
 proc buildSubscriptionFilter*(cl: CoordinationLayer): seq[tuple[contentTopic: string, handler: string]] =
   ## Build a subscription filter for logos-messaging.
   ## Returns tuples of (contentTopic, handlerName) for documentation.
   @[
-    (cl.spamProtection.getMembershipContentTopic(), "handleMembershipUpdate"),
     (cl.spamProtection.getProofMetadataContentTopic(), "handleProofMetadata")
   ]
 
@@ -128,10 +107,8 @@ const IntegrationExample* = """
 import logos_messaging
 import mix_rln_spam_protection
 
-# Create configuration (optionally customize content topics)
+# Create configuration
 var config = defaultConfig()
-# config.membershipContentTopic = "/my-app/rln/membership/v1"
-# config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
 
 let spamProtection = newMixRlnSpamProtection(config).get()
 await spamProtection.init()
@@ -172,15 +149,5 @@ proc createLoggingPublishCallback*(): PublishCallback =
       topic = contentTopic,
       dataLen = data.len
   return callback
-
-# Utility for printing membership update in human-readable form
-proc formatMembershipUpdate*(update: MembershipUpdate): string =
-  ## Format a membership update for logging/display.
-  let actionStr = case update.action
-    of MembershipAction.Add: "ADD"
-    of MembershipAction.Remove: "REMOVE"
-
-  result = actionStr & " member at index " & $update.index &
-           " (idCommitment: " & update.idCommitment[0..7].toHex() & "...)"
 
 # Note: toHex is imported from types module via spam_protection

@@ -51,15 +51,14 @@
 ## 2. Generates a fresh proof for the next hop
 ## 3. Broadcasts proof metadata for network-wide spam detection
 ##
-## Membership is managed offchain via content-topic propagation:
-## - `/mix/rln/membership/v1` - membership additions/removals
-## - `/mix/rln/metadata/v1` - proof metadata for spam detection
+## Content topics used:
+## - `/mix/rln/metadata/v1` - proof metadata for network-wide spam detection
 ##
 ## ## Key Types
 ##
 ## - `MixRlnSpamProtection` - Main plugin implementing spam protection
 ## - `MixRlnConfig` - Configuration for the plugin
-## - `OffchainGroupManager` - Membership management via content-topics
+## - `GroupManager` - Membership management via external service
 ## - `NullifierLog` - Tracks proof metadata for spam detection
 ## - `IdentityCredential` - Node's RLN credentials
 ##

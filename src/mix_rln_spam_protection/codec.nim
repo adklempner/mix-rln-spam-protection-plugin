@@ -15,12 +15,6 @@
 ##     bytes nullifier = 6;
 ##   }
 ##
-##   message MembershipUpdate {
-##     uint32 action = 1;
-##     bytes id_commitment = 2;
-##     uint64 user_message_limit = 3;
-##     uint64 index = 4;
-##   }
 
 {.push raises: [].}
 
@@ -93,52 +87,6 @@ proc decode*(T: type RateLimitProof, buffer: seq[byte]): ProtobufResult[T] =
 
   ok(proof)
 
-# MembershipUpdate encoding/decoding
-
-proc encode*(update: MembershipUpdate): ProtoBuffer =
-  ## Encode a MembershipUpdate to protobuf.
-  var buf = initProtoBuffer()
-
-  buf.write3(1, uint32(ord(update.action)))
-  buf.write3(2, @(update.idCommitment))
-  buf.write3(3, update.userMessageLimit)
-  buf.write3(4, update.index)
-  buf.finish3()
-
-  buf
-
-proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to a MembershipUpdate.
-  var update: MembershipUpdate
-  let pb = initProtoBuffer(buffer)
-
-  var action: uint32
-  if not ?pb.getField(1, action):
-    return err(ProtobufError.missingRequiredField("action"))
-  if action > 1:
-    return err(ProtobufError.invalidLengthField("action"))
-  update.action = MembershipAction(action)
-
-  var idCommitment: seq[byte]
-  if not ?pb.getField(2, idCommitment):
-    return err(ProtobufError.missingRequiredField("id_commitment"))
-  if idCommitment.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("id_commitment"))
-  copyMem(addr update.idCommitment[0], addr idCommitment[0], HashByteSize)
-
-  var userMessageLimit: uint64
-  if not ?pb.getField(3, userMessageLimit):
-    # Default to 100 for backward compatibility
-    userMessageLimit = UserMessageLimit
-  update.userMessageLimit = userMessageLimit
-
-  var index: uint64
-  if not ?pb.getField(4, index):
-    return err(ProtobufError.missingRequiredField("index"))
-  update.index = index
-
-  ok(update)
-
 # ProofMetadataBroadcast encoding/decoding
 # Note: This maps to a simplified version for backward compatibility
 
@@ -203,10 +151,6 @@ proc decode*(T: type ProofMetadataBroadcast, buffer: seq[byte]): ProtobufResult[
 proc toBytes*(proof: RateLimitProof): seq[byte] =
   ## Serialize a RateLimitProof to bytes using protobuf.
   proof.encode().buffer
-
-proc toBytes*(update: MembershipUpdate): seq[byte] =
-  ## Serialize a MembershipUpdate to bytes using protobuf.
-  update.encode().buffer
 
 proc toBytes*(broadcast: ProofMetadataBroadcast): seq[byte] =
   ## Serialize a ProofMetadataBroadcast to bytes using protobuf.

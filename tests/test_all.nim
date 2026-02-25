@@ -127,26 +127,6 @@ suite "Type Serialization":
     check proof.shareY == proof2.shareY
     check proof.nullifier == proof2.nullifier
 
-  test "MembershipUpdate serialization roundtrip":
-    var update: MembershipUpdate
-    update.action = MembershipAction.Add
-    for i in 0 ..< update.idCommitment.len:
-      update.idCommitment[i] = byte(i)
-    update.index = 12345
-
-    # Serialize using protobuf
-    let serialized = update.toBytes()
-    check serialized.len > 0  # Protobuf has variable length
-
-    # Deserialize using protobuf
-    let deserialized = MembershipUpdate.decode(serialized)
-    check deserialized.isOk
-    let update2 = deserialized.get()
-
-    check update.action == update2.action
-    check update.idCommitment == update2.idCommitment
-    check update.index == update2.index
-
   test "ProofMetadataBroadcast serialization roundtrip":
     var broadcast: ProofMetadataBroadcast
     for i in 0 ..< broadcast.nullifier.len:

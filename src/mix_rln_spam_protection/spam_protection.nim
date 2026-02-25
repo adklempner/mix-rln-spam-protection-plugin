@@ -40,12 +40,11 @@ type
     userMessageLimit*: int ## Maximum messages per epoch per member. Default: 100
     keystorePath*: string ## Path to the credentials keystore file.
     keystorePassword*: string ## Password for the keystore.
-    treePath*: string ## Path for persisting the Merkle tree.
     rlnResourcesPath*: string ## Path to RLN circuit resources (empty for bundled).
-    membershipContentTopic*: string
-      ## Content topic for broadcasting membership updates. Default: "/mix/rln/membership/v1"
     proofMetadataContentTopic*: string
       ## Content topic for broadcasting proof metadata. Default: "/mix/rln/metadata/v1"
+    merkleServicePollIntervalSeconds*: float
+      ## Polling interval for onchain Merkle proof service. Default: 5.0
 
   # Main spam protection implementation - inherits from nim-libp2p interface
   MixRlnSpamProtection* = ref object of libp2p_spam.SpamProtection
@@ -55,7 +54,7 @@ type
     ## per-hop proof generation and verification.
     config: MixRlnConfig
     rlnInstance: RLNInstance
-    groupManager: OffchainGroupManager
+    groupManager: GroupManager
     nullifierLog: NullifierLog
     state: PluginState
     messageIdCounter: uint # Tracks messages within current epoch
@@ -81,10 +80,9 @@ proc defaultConfig*(): MixRlnConfig =
     userMessageLimit: UserMessageLimit,
     keystorePath: DefaultKeystorePath,
     keystorePassword: "",
-    treePath: DefaultTreePath,
     rlnResourcesPath: "",
-    membershipContentTopic: MembershipContentTopic,
     proofMetadataContentTopic: ProofMetadataContentTopic,
+    merkleServicePollIntervalSeconds: 5.0,
   )
 
 proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtection] =
@@ -96,9 +94,10 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
   let rlnInstance = newRLNInstance(config.rlnResourcesPath).valueOr:
     return err("Failed to create RLN instance: " & error)
 
-  # Create group manager with configured content topic and message limit
-  let groupManager = newOffchainGroupManager(
-    rlnInstance, config.membershipContentTopic, uint64(config.userMessageLimit)
+  # Create group manager
+  let groupManager = newGroupManager(
+    rlnInstance, config.merkleServicePollIntervalSeconds,
+    uint64(config.userMessageLimit),
   )
 
   # Create nullifier log
@@ -122,7 +121,15 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
 proc setPublishCallback*(sp: MixRlnSpamProtection, callback: PublishCallback) =
   ## Set the callback for publishing to logos-messaging.
   sp.publishCallback = some(callback)
-  sp.groupManager.setPublishCallback(callback)
+
+proc setMerkleProofCallbacks*(
+    sp: MixRlnSpamProtection,
+    fetchProof: FetchMerkleProofCallback,
+    fetchRoots: FetchLatestRootsCallback,
+) =
+  ## Set the callbacks for the external Merkle proof service.
+  sp.groupManager.setFetchMerkleProof(fetchProof)
+  sp.groupManager.setFetchLatestRoots(fetchRoots)
 
 proc setSpamHandler*(sp: MixRlnSpamProtection, handler: SpamHandler) =
   ## Set the handler called when spam is detected.
@@ -157,10 +164,6 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
     if maybeRateLimit.isSome:
       sp.groupManager.userMessageLimit = maybeRateLimit.get()
       info "Using rate limit from keystore", userMessageLimit = maybeRateLimit.get()
-    # Note: We don't restore to tree here if we have an index, because loadTree()
-    # might be called next which would clear membership tables.
-    # The restoration happens in restoreCredentialsToTree() after tree operations.
-
     if wasGenerated:
       info "Generated new credentials",
         commitment = cred.idCommitment[0 .. 7].toHex() & "..."
@@ -463,15 +466,6 @@ method verifyProof*(
 
 # Coordination layer handlers
 
-proc handleMembershipUpdate*(
-    sp: MixRlnSpamProtection, data: seq[byte]
-): Future[RlnResult[void]] {.async.} =
-  ## Handle a membership update received from the coordination layer.
-  let update = MembershipUpdate.decode(data).valueOr:
-    return err("Failed to decode membership update: " & $error)
-
-  await sp.groupManager.handleMembershipUpdate(update)
-
 proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[void] =
   ## Handle proof metadata received from the coordination layer.
   ## This enables network-wide spam detection.
@@ -489,44 +483,6 @@ proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[
       nullifier = broadcast.nullifier.toHex(), epoch = epochToUint64(broadcast.epoch)
     # Note: We can't recover the secret from just metadata,
     # we'd need the full proofs which are exchanged separately
-
-  ok()
-
-# Tree persistence
-
-proc saveTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Save the current tree state to file.
-  sp.groupManager.saveTreeToFile(sp.config.treePath)
-
-proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Load tree state from file.
-  let result = sp.groupManager.loadTreeFromFile(sp.config.treePath)
-  if result.isOk:
-    let memberCount = sp.groupManager.getMemberCount()
-    debug "Tree loaded from file",
-      treePath = sp.config.treePath,
-      memberCount = memberCount
-  result
-
-proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Restore our credentials to the tree if we have an index.
-  ## This should be called after tree loading (whether it succeeds or fails).
-  ## If our member is already in the tree, this is a no-op.
-  if sp.groupManager.membershipIndex.isSome and sp.groupManager.credentials.isSome:
-    let cred = sp.groupManager.credentials.get()
-    let index = sp.groupManager.membershipIndex.get()
-
-    # Check if our member is already in the tree (tracked by idCommitment)
-    if not sp.groupManager.hasMemberByIdCommitment(cred.idCommitment):
-      let restoreRes =
-        sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
-      if restoreRes.isErr:
-        return err("Failed to restore member from keystore: " & restoreRes.error)
-      info "Restored credentials to tree", index = index
-
-  # Always flush after tree operations to ensure Zerokit internal cache is synced
-  if not flush(sp.groupManager.rlnInstance.ctx):
-    return err("Failed to flush tree after restoring credentials")
 
   ok()
 
@@ -552,16 +508,12 @@ proc getState*(sp: MixRlnSpamProtection): PluginState =
   ## Get the current plugin state.
   sp.state
 
-proc getMembershipContentTopic*(sp: MixRlnSpamProtection): string =
-  ## Get the configured membership content topic.
-  sp.config.membershipContentTopic
-
 proc getProofMetadataContentTopic*(sp: MixRlnSpamProtection): string =
   ## Get the configured proof metadata content topic.
   sp.config.proofMetadataContentTopic
 
 proc getContentTopics*(sp: MixRlnSpamProtection): seq[string] =
   ## Get all content topics used by this plugin.
-  @[sp.config.membershipContentTopic, sp.config.proofMetadataContentTopic]
+  @[sp.config.proofMetadataContentTopic]
 
 # Note: toHex is imported from types module

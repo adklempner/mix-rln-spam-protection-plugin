@@ -475,6 +475,19 @@ proc insertMemberAt*(
 
 # ----------------- Witness-based proof generation -----------------
 
+# ==========================================================================
+# FFI output format constants
+# ==========================================================================
+# Format: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
+# Total: 288 bytes
+const
+  ProofOutputSize = 288
+  ProofFieldSize = 128 # zkSNARK proof
+  RootFieldSize = 32
+  ExtNullifierFieldSize = 32
+  ShareFieldSize = 32
+  NullifierFieldSize = 32
+
 proc serialize*(witness: RLNWitnessInput): seq[byte] =
   ## Serializes the RLN witness into a byte array following zerokit's expected format.
   ##
@@ -515,6 +528,105 @@ proc serialize*(witness: RLNWitnessInput): seq[byte] =
 
   return buffer
 
+proc generateRlnProofFromWitnessData(
+    instance: RLNInstance,
+    credential: IdentityCredential,
+    pathElements: seq[byte],
+    identityPathIndex: seq[byte],
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint = 0,
+    userMessageLimit: uint64 = UserMessageLimit,
+): RlnResult[RateLimitProof] =
+  ## Shared implementation for generating an RLN proof from witness data.
+  ## Both generateRlnProofWithWitness (local tree) and
+  ## generateRlnProofFromExternalWitness (external service) delegate here.
+
+  # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
+  let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
+    return err("Failed to compute external nullifier: " & error)
+
+  # Compute signal hash x = keccak256(signal)
+  var x: Field
+  if signal.len > 0:
+    let signalHash = keccak256.digest(signal)
+    for i in 0 ..< 32:
+      x[i] = signalHash.data[i]
+
+  # Build the witness input
+  let witness = RLNWitnessInput(
+    identity_secret: seqToField(@(credential.idSecretHash)),
+    user_message_limit: uint64ToField(userMessageLimit),
+    message_id: uint64ToField(uint64(messageId)),
+    path_elements: pathElements,
+    identity_path_index: identityPathIndex,
+    x: x,
+    external_nullifier: seqToField(@externalNullifier),
+  )
+
+  trace "Built RLN witness for proof generation",
+    pathElementsLen = pathElements.len, messageId = messageId
+
+  # Serialize the witness
+  let serializedWitness = witness.serialize()
+
+  trace "Serialized witness for FFI", serializedLen = serializedWitness.len
+
+  var inputBuffer = serializedWitness.toBuffer()
+  var outputBuffer: Buffer
+
+  # Call generate_proof_with_witness FFI
+  if not generate_proof_with_witness(instance.ctx, addr inputBuffer, addr outputBuffer):
+    error "generate_proof_with_witness FFI call failed"
+    return err("Failed to generate RLN proof with witness")
+
+  trace "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
+
+  if outputBuffer.len < ProofOutputSize:
+    return err(
+      "Invalid proof output length: " & $outputBuffer.len & ", expected " &
+        $ProofOutputSize
+    )
+
+  let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
+
+  var proof: RateLimitProof
+  var offset = 0
+
+  # zkSNARK proof (128 bytes)
+  for i in 0 ..< ProofFieldSize:
+    proof.proof[i] = outputData[offset + i]
+  offset += ProofFieldSize
+
+  # Merkle root (32 bytes)
+  for i in 0 ..< RootFieldSize:
+    proof.merkleRoot[i] = outputData[offset + i]
+  offset += RootFieldSize
+
+  # Skip external_nullifier from output (32 bytes) - we use the epoch from input
+  proof.epoch = epoch
+  offset += ExtNullifierFieldSize
+
+  # Share X (32 bytes)
+  for i in 0 ..< ShareFieldSize:
+    proof.shareX[i] = outputData[offset + i]
+  offset += ShareFieldSize
+
+  # Share Y (32 bytes)
+  for i in 0 ..< ShareFieldSize:
+    proof.shareY[i] = outputData[offset + i]
+  offset += ShareFieldSize
+
+  # Nullifier (32 bytes)
+  for i in 0 ..< NullifierFieldSize:
+    proof.nullifier[i] = outputData[offset + i]
+
+  debug "Witness-based proof generation complete",
+    proofMerkleRoot = proof.merkleRoot.toHex()
+
+  ok(proof)
+
 proc generateRlnProofWithWitness*(
     instance: RLNInstance,
     credential: IdentityCredential,
@@ -530,7 +642,7 @@ proc generateRlnProofWithWitness*(
   ## explicitly and using generate_proof_with_witness FFI.
   ## userMessageLimit must match the value used for rate commitment in the tree.
   ##
-  ## This matches waku's OnchainGroupManager approach for reliable proof generation.
+  ## This approach provides reliable proof generation with explicit Merkle paths.
 
   # Note: MerkleTreeDepth is imported from constants.nim
 
@@ -570,108 +682,29 @@ proc generateRlnProofWithWitness*(
   for i in 0 ..< MerkleTreeDepth:
     identityPathIndex[i] = merkleProofBytes[IdentityPathIndexOffset + i]
 
-  # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
-  let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  # Compute signal hash x = keccak256(signal)
-  var x: Field
-  if signal.len > 0:
-    let signalHash = keccak256.digest(signal)
-    for i in 0 ..< 32:
-      x[i] = signalHash.data[i]
-
-  # Build the witness input
-  let witness = RLNWitnessInput(
-    identity_secret: seqToField(@(credential.idSecretHash)),
-    user_message_limit: uint64ToField(userMessageLimit),
-    message_id: uint64ToField(uint64(messageId)),
-    path_elements: pathElements,
-    identity_path_index: identityPathIndex,
-    x: x,
-    external_nullifier: seqToField(@externalNullifier),
+  generateRlnProofFromWitnessData(
+    instance, credential, pathElements, identityPathIndex,
+    epoch, rlnIdentifier, signal, messageId, userMessageLimit,
   )
 
-  trace "Built RLN witness for proof generation",
-    memberIndex = memberIndex,
-    pathElementsLen = pathElements.len,
-    messageId = messageId
-
-  # Serialize the witness
-  let serializedWitness = witness.serialize()
-
-  trace "Serialized witness for FFI", serializedLen = serializedWitness.len
-
-  var inputBuffer = serializedWitness.toBuffer()
-  var outputBuffer: Buffer
-
-  # Call generate_proof_with_witness FFI
-  if not generate_proof_with_witness(instance.ctx, addr inputBuffer, addr outputBuffer):
-    error "generate_proof_with_witness FFI call failed"
-    return err("Failed to generate RLN proof with witness")
-
-  trace "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
-
-  # ==========================================================================
-  # Parse FFI output buffer
-  # ==========================================================================
-  # Format: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
-  # Total: 288 bytes
-  const
-    ProofOutputSize = 288
-    ProofFieldSize = 128  # zkSNARK proof
-    RootFieldSize = 32
-    ExtNullifierFieldSize = 32
-    ShareFieldSize = 32
-    NullifierFieldSize = 32
-
-  if outputBuffer.len < ProofOutputSize:
-    return err("Invalid proof output length: " & $outputBuffer.len & ", expected " & $ProofOutputSize)
-
-  let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
-
-  var proof: RateLimitProof
-  var offset = 0
-
-  # zkSNARK proof (128 bytes)
-  for i in 0 ..< ProofFieldSize:
-    proof.proof[i] = outputData[offset + i]
-  offset += ProofFieldSize
-
-  # Merkle root (32 bytes)
-  for i in 0 ..< RootFieldSize:
-    proof.merkleRoot[i] = outputData[offset + i]
-  offset += RootFieldSize
-
-  # Skip external_nullifier from output (32 bytes) - we use the epoch from input
-  proof.epoch = epoch
-  offset += ExtNullifierFieldSize
-
-  # Share X (32 bytes)
-  for i in 0 ..< ShareFieldSize:
-    proof.shareX[i] = outputData[offset + i]
-  offset += ShareFieldSize
-
-  # Share Y (32 bytes)
-  for i in 0 ..< ShareFieldSize:
-    proof.shareY[i] = outputData[offset + i]
-  offset += ShareFieldSize
-
-  # Nullifier (32 bytes)
-  for i in 0 ..< NullifierFieldSize:
-    proof.nullifier[i] = outputData[offset + i]
-
-  # Verify the proof root matches our current tree root
-  let currentRoot = instance.getMerkleRoot().valueOr:
-    warn "Could not verify proof root", error = error
-    return ok(proof)
-
-  debug "Witness-based proof generation complete",
-    proofMerkleRoot = proof.merkleRoot.toHex(),
-    currentMerkleRoot = currentRoot.toHex(),
-    rootsMatch = proof.merkleRoot == currentRoot
-
-  ok(proof)
+proc generateRlnProofFromExternalWitness*(
+    instance: RLNInstance,
+    credential: IdentityCredential,
+    pathElements: seq[byte],
+    identityPathIndex: seq[byte],
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint = 0,
+    userMessageLimit: uint64 = UserMessageLimit,
+): RlnResult[RateLimitProof] =
+  ## Generate an RLN proof using externally-provided Merkle path data.
+  ## Used by GroupManager where the Merkle proof comes from
+  ## an external service instead of the local zerokit tree.
+  generateRlnProofFromWitnessData(
+    instance, credential, pathElements, identityPathIndex,
+    epoch, rlnIdentifier, signal, messageId, userMessageLimit,
+  )
 
 proc verifyRlnProof*(
     instance: RLNInstance,
