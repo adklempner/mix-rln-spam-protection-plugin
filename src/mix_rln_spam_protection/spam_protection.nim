@@ -488,9 +488,8 @@ proc handleMembershipUpdate*(
     return err("Failed to decode membership update: " & $error)
 
   if sp.groupManager of OffchainGroupManager:
-    await OffchainGroupManager(sp.groupManager).handleMembershipUpdate(update)
-  else:
-    discard # On-chain LEZ doesn't use content-topic membership updates
+    discard await OffchainGroupManager(sp.groupManager).handleMembershipUpdate(update)
+  # On-chain LEZ doesn't use content-topic membership updates
 
 proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[void] =
   ## Handle proof metadata received from the coordination layer.

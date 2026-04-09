@@ -59,6 +59,9 @@ proc setFetchCallbacks*(
   gm.fetchRoots = fetchRoots
   gm.fetchProof = fetchProof
 
+proc pollLoop(gm: OnchainLEZGroupManager) {.async.}
+  # forward declaration
+
 method init*(gm: OnchainLEZGroupManager): Future[RlnResult[void]] {.async.} =
   if gm.isInitialized:
     return ok()
