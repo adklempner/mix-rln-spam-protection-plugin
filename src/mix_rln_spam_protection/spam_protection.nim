@@ -20,10 +20,11 @@ import ./constants
 import ./codec
 import ./rln_interface
 import ./group_manager
+import ./onchain_group_manager
 import ./nullifier_log
 import ./credentials
 
-export types, constants, codec, group_manager, nullifier_log, credentials
+export types, constants, codec, group_manager, onchain_group_manager, nullifier_log, credentials
 # Re-export nim-libp2p types for convenience
 export libp2p_spam.SpamProtection
 
@@ -46,6 +47,9 @@ type
       ## Content topic for broadcasting membership updates. Default: "/mix/rln/membership/v1"
     proofMetadataContentTopic*: string
       ## Content topic for broadcasting proof metadata. Default: "/mix/rln/metadata/v1"
+    useOnchainLEZ*: bool
+      ## When true, use OnchainLEZGroupManager (fetches roots/proofs from LSSA sequencer
+      ## via logos-core RLN module) instead of OffchainGroupManager (local tree + keystores).
 
   # Main spam protection implementation - inherits from nim-libp2p interface
   MixRlnSpamProtection* = ref object of libp2p_spam.SpamProtection
@@ -55,7 +59,7 @@ type
     ## per-hop proof generation and verification.
     config: MixRlnConfig
     rlnInstance: RLNInstance
-    groupManager: OffchainGroupManager
+    groupManager*: GroupManager
     nullifierLog: NullifierLog
     state: PluginState
     messageIdCounter: uint # Tracks messages within current epoch
@@ -96,10 +100,14 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
   let rlnInstance = newRLNInstance(config.rlnResourcesPath).valueOr:
     return err("Failed to create RLN instance: " & error)
 
-  # Create group manager with configured content topic and message limit
-  let groupManager = newOffchainGroupManager(
-    rlnInstance, config.membershipContentTopic, uint64(config.userMessageLimit)
-  )
+  # Create group manager — on-chain LEZ or off-chain depending on config
+  let groupManager: GroupManager =
+    if config.useOnchainLEZ:
+      OnchainLEZGroupManager.new(rlnInstance, uint64(config.userMessageLimit))
+    else:
+      newOffchainGroupManager(
+        rlnInstance, config.membershipContentTopic, uint64(config.userMessageLimit)
+      )
 
   # Create nullifier log
   let nullifierLog = newNullifierLog()
@@ -122,7 +130,8 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
 proc setPublishCallback*(sp: MixRlnSpamProtection, callback: PublishCallback) =
   ## Set the callback for publishing to logos-messaging.
   sp.publishCallback = some(callback)
-  sp.groupManager.setPublishCallback(callback)
+  if sp.groupManager of OffchainGroupManager:
+    OffchainGroupManager(sp.groupManager).setPublishCallback(callback)
 
 proc setSpamHandler*(sp: MixRlnSpamProtection, handler: SpamHandler) =
   ## Set the handler called when spam is detected.
@@ -340,7 +349,12 @@ proc handleSpamDetected(
   copyMem(addr idCommitment[0], unsafeAddr spammerCommitment[0], HashByteSize)
 
   # Look up the spammer by their idCommitment (tracked for spam recovery)
-  let memberIndex = sp.groupManager.getMemberIndexByIdCommitment(idCommitment)
+  # Only available with OffchainGroupManager (local tree tracks members)
+  let memberIndex =
+    if sp.groupManager of OffchainGroupManager:
+      OffchainGroupManager(sp.groupManager).getMemberIndexByIdCommitment(idCommitment)
+    else:
+      none(MembershipIndex)
 
   if memberIndex.isSome:
     let index = memberIndex.get()
@@ -473,7 +487,10 @@ proc handleMembershipUpdate*(
   let update = MembershipUpdate.decode(data).valueOr:
     return err("Failed to decode membership update: " & $error)
 
-  await sp.groupManager.handleMembershipUpdate(update)
+  if sp.groupManager of OffchainGroupManager:
+    await OffchainGroupManager(sp.groupManager).handleMembershipUpdate(update)
+  else:
+    discard # On-chain LEZ doesn't use content-topic membership updates
 
 proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[void] =
   ## Handle proof metadata received from the coordination layer.
@@ -498,39 +515,40 @@ proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[
 # Tree persistence
 
 proc saveTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Save the current tree state to file.
-  sp.groupManager.saveTreeToFile(sp.config.treePath)
+  ## Save the current tree state to file (offchain only).
+  if sp.groupManager of OffchainGroupManager:
+    OffchainGroupManager(sp.groupManager).saveTreeToFile(sp.config.treePath)
+  else:
+    ok() # On-chain LEZ doesn't persist a local tree
 
 proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Load tree state from file.
-  let loadResult = sp.groupManager.loadTreeFromFile(sp.config.treePath)
-  if loadResult.isOk:
-    let memberCount = sp.groupManager.getMemberCount()
-    debug "Tree loaded from file",
-      treePath = sp.config.treePath,
-      memberCount = memberCount
-  loadResult
+  ## Load tree state from file (offchain only).
+  if sp.groupManager of OffchainGroupManager:
+    let gm = OffchainGroupManager(sp.groupManager)
+    let loadResult = gm.loadTreeFromFile(sp.config.treePath)
+    if loadResult.isOk:
+      let memberCount = gm.getMemberCount()
+      debug "Tree loaded from file",
+        treePath = sp.config.treePath,
+        memberCount = memberCount
+    loadResult
+  else:
+    ok() # On-chain LEZ doesn't use a local tree
 
 proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
-  ## Restore our credentials to the tree if we have an index.
-  ## This should be called after tree loading (whether it succeeds or fails).
-  ## If our member is already in the tree, this is a no-op.
-  if sp.groupManager.membershipIndex.isSome and sp.groupManager.credentials.isSome:
-    let cred = sp.groupManager.credentials.get()
-    let index = sp.groupManager.membershipIndex.get()
-
-    # Check if our member is already in the tree (tracked by idCommitment)
-    if not sp.groupManager.hasMemberByIdCommitment(cred.idCommitment):
-      let restoreRes =
-        sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
-      if restoreRes.isErr:
-        return err("Failed to restore member from keystore: " & restoreRes.error)
-      info "Restored credentials to tree", index = index
-
-  # Always flush after tree operations to ensure Zerokit internal cache is synced
-  if not flush(sp.groupManager.rlnInstance.ctx):
-    return err("Failed to flush tree after restoring credentials")
-
+  ## Restore our credentials to the tree if we have an index (offchain only).
+  if sp.groupManager of OffchainGroupManager:
+    let gm = OffchainGroupManager(sp.groupManager)
+    if gm.membershipIndex.isSome and gm.credentials.isSome:
+      let cred = gm.credentials.get()
+      let index = gm.membershipIndex.get()
+      if not gm.hasMemberByIdCommitment(cred.idCommitment):
+        let restoreRes = gm.restoreMemberFromKeystore(cred.idCommitment, index)
+        if restoreRes.isErr:
+          return err("Failed to restore member from keystore: " & restoreRes.error)
+        info "Restored credentials to tree", index = index
+    if not flush(gm.rlnInstance.ctx):
+      return err("Failed to flush tree after restoring credentials")
   ok()
 
 # Utility accessors
@@ -545,7 +563,20 @@ proc getMembershipIndex*(sp: MixRlnSpamProtection): Option[MembershipIndex] =
 
 proc getMemberCount*(sp: MixRlnSpamProtection): int =
   ## Get the number of registered members.
-  sp.groupManager.getMemberCount()
+  if sp.groupManager of OffchainGroupManager:
+    OffchainGroupManager(sp.groupManager).getMemberCount()
+  else:
+    0 # On-chain LEZ doesn't track member count locally
+
+proc setLEZCallbacks*(
+    sp: MixRlnSpamProtection,
+    fetchRoots: FetchRootsCallback,
+    fetchProof: FetchProofCallback,
+) =
+  ## Set the LEZ fetcher callbacks on the on-chain group manager.
+  ## Must be called before start() when useOnchainLEZ is true.
+  if sp.groupManager of OnchainLEZGroupManager:
+    OnchainLEZGroupManager(sp.groupManager).setFetchCallbacks(fetchRoots, fetchProof)
 
 proc getRlnIdentifier*(sp: MixRlnSpamProtection): RlnIdentifier =
   ## Get the configured RLN identifier.
