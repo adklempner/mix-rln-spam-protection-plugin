@@ -153,8 +153,12 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   if gmInitResult.isErr:
     return err("Failed to initialize group manager: " & gmInitResult.error)
 
-  # Load or generate credentials
-  if sp.config.keystorePassword.len > 0:
+  # Load or generate credentials (skip if already set, e.g. by gifter protocol)
+  if sp.groupManager.credentials.isSome:
+    info "Credentials already set (e.g. via gifter), skipping keystore load",
+      commitment = sp.groupManager.credentials.get().idCommitment[0 .. 7].toHex() & "...",
+      hasIndex = sp.groupManager.membershipIndex.isSome
+  elif sp.config.keystorePassword.len > 0:
     let (cred, maybeIndex, maybeRateLimit, wasGenerated) = loadOrGenerateCredentials(
       sp.config.keystorePath, sp.config.keystorePassword
     ).valueOr:
@@ -162,13 +166,9 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
 
     sp.groupManager.credentials = some(cred)
     sp.groupManager.membershipIndex = maybeIndex
-    # If keystore has a stored rate limit, use it (overrides node's config)
     if maybeRateLimit.isSome:
       sp.groupManager.userMessageLimit = maybeRateLimit.get()
       info "Using rate limit from keystore", userMessageLimit = maybeRateLimit.get()
-    # Note: We don't restore to tree here if we have an index, because loadTree()
-    # might be called next which would clear membership tables.
-    # The restoration happens in restoreCredentialsToTree() after tree operations.
 
     if wasGenerated:
       info "Generated new credentials",
@@ -179,7 +179,6 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
         hasIndex = maybeIndex.isSome,
         hasRateLimit = maybeRateLimit.isSome
   else:
-    # Generate credentials without saving
     let cred = generateCredentials().valueOr:
       return err("Failed to generate credentials: " & error)
     sp.groupManager.credentials = some(cred)
