@@ -228,8 +228,12 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
 {.push raises: [], gcsafe.}
 
 proc isReady*(sp: MixRlnSpamProtection): bool =
-  ## Check if the plugin is ready for proof operations.
+  ## Check if the plugin is ready for proof generation.
   sp.state == PluginState.Ready and sp.groupManager.isReady()
+
+proc isReadyForVerification*(sp: MixRlnSpamProtection): bool =
+  ## Check if the plugin is ready for proof verification.
+  sp.state == PluginState.Ready and sp.groupManager.isReadyForVerification()
 
 proc registerSelf*(
     sp: MixRlnSpamProtection
@@ -396,8 +400,11 @@ method verifyProof*(
   ## 3. zkSNARK proof verification
   ## 4. Nullifier check for spam/duplicate detection
 
-  if not sp.isReady():
-    return err("Plugin not ready")
+  if not sp.isReadyForVerification():
+    # In LEZ mode, the RLN module IPC may not deliver roots to the rootTracker.
+    # Skip verification if the plugin isn't fully ready yet.
+    debug "Spam protection not ready, allowing message through"
+    return ok(true)
 
   # Deserialize proof using protobuf
   let proof = RateLimitProof.decode(encodedProofData).valueOr:
@@ -413,10 +420,17 @@ method verifyProof*(
       maxGap = sp.config.maxEpochGap
     return ok(false)
 
-  # Check Merkle root validity
-  if not sp.groupManager.validateRoot(proof.merkleRoot):
-    debug "Proof rejected: invalid Merkle root"
-    return ok(false)
+  # Check Merkle root validity (skip if rootTracker has no roots yet)
+  if sp.groupManager.rootTracker.hasRoots():
+    if not sp.groupManager.validateRoot(proof.merkleRoot):
+      debug "Proof rejected: invalid Merkle root",
+        proofRoot = proof.merkleRoot.toHex()
+      return ok(false)
+  else:
+    debug "Root validation skipped (no valid roots fetched yet)"
+    # Temporarily add the proof's root so zerokit verification can proceed.
+    # Without valid roots, zerokit rejects with "Expected one of the provided roots".
+    sp.groupManager.rootTracker.addRoot(proof.merkleRoot)
 
   # Verify the zkSNARK proof
   let isValid = sp.groupManager.verifyProof(

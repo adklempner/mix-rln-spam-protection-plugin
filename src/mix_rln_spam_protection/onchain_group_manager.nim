@@ -40,7 +40,7 @@ proc new*(
     T: typedesc[OnchainLEZGroupManager],
     rlnInstance: RLNInstance,
     userMessageLimit: uint64 = UserMessageLimit,
-    pollInterval: Duration = seconds(5),
+    pollInterval: Duration = seconds(10),
 ): T =
   T(
     rlnInstance: rlnInstance,
@@ -76,12 +76,15 @@ method start*(gm: OnchainLEZGroupManager): Future[RlnResult[void]] {.async.} =
     return err("Fetch callbacks not set")
 
   gm.isSynced = true
-  info "OnchainLEZGroupManager started polling",
+  info "OnchainLEZGroupManager started (poll loop deferred)",
     intervalSeconds = gm.pollInterval.seconds
-
-  # Start background poll loop (non-blocking)
-  asyncSpawn gm.pollLoop()
   ok()
+
+proc startPolling*(gm: OnchainLEZGroupManager) =
+  ## Start the background poll loop. Call AFTER the node is fully started
+  ## to avoid interfering with switch.start().
+  if gm.isSynced and gm.fetchRoots != nil:
+    asyncSpawn gm.pollLoop()
 
 method stop*(gm: OnchainLEZGroupManager): Future[void] {.async.} =
   gm.isSynced = false
@@ -104,9 +107,15 @@ method withdraw*(
 {.push raises: [], gcsafe.}
 
 method isReady*(gm: OnchainLEZGroupManager): bool =
+  ## Ready for proof GENERATION (needs credentials + cached proof from LEZ).
   gm.isInitialized and gm.isSynced and
     gm.credentials.isSome and gm.membershipIndex.isSome and
     gm.cachedProof.isSome
+
+method isReadyForVerification*(gm: OnchainLEZGroupManager): bool =
+  ## Ready for proof VERIFICATION (only needs to be initialized and synced).
+  ## Does NOT require local credentials or cached proofs.
+  gm.isInitialized and gm.isSynced
 
 method generateProof*(
     gm: OnchainLEZGroupManager,
@@ -148,7 +157,9 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
         let roots = rootsResult.get()
         for root in roots:
           gm.rootTracker.addRoot(root)
-        trace "Polled valid roots from LEZ", count = roots.len
+        if roots.len > 0:
+          debug "Polled valid roots from LEZ",
+            count = roots.len, firstRoot = roots[0].toHex()
       else:
         debug "Failed to fetch roots from LEZ", error = rootsResult.error
     except CatchableError as e:
