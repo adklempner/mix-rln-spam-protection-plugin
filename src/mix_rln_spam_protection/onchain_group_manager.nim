@@ -29,11 +29,9 @@ type
     pathElements*: seq[byte]
     identityPathIndex*: seq[byte]
     root*: MerkleNode
-    # validRoots: roots window read from the SAME on-chain main account that
-    # produced this proof. Populated atomically by the RLN module's
-    # get_merkle_proofs RPC, so consumers can refresh their local rootTracker
-    # without a follow-up get_valid_roots that could race against a fresh
-    # registration tx and return a window that no longer contains `root`.
+    # Roots window read atomically with `root` from the same on-chain account,
+    # so consumers can refresh rootTracker without a separate get_valid_roots
+    # call that could race a fresh registration tx.
     validRoots*: seq[MerkleNode]
 
   OnchainLEZGroupManager* = ref object of GroupManager
@@ -181,28 +179,21 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
     except CatchableError as e:
       debug "Exception fetching roots", error = e.msg
 
-    # Fetch merkle proof for our membership index. The RPC now returns
-    # validRoots atomically (read from the same on-chain main account that
-    # produced the proof), so we refresh the local rootTracker from this
-    # response instead of relying on the separate fetchRoots call above —
-    # which can race against an intervening registration tx and return a
-    # roots window that no longer contains the root encoded in the proof.
+    # Refresh rootTracker from validRoots returned atomically with the proof,
+    # so we don't carry a roots window that races against a registration tx
+    # and drops the root encoded in the proof.
     if gm.membershipIndex.isSome:
       try:
         let proofResult = await gm.fetchProof(gm.membershipIndex.get())
         if proofResult.isOk:
           let p = proofResult.get()
           gm.cachedProof = some(p)
-          # Reset so we don't carry over a stale snapshot from a prior poll
-          # whose roots were dropped on chain. The unified RPC always returns
-          # validRoots atomically with the proof.
           gm.rootTracker.resetRoots()
           for r in p.validRoots:
             gm.rootTracker.addRoot(r)
           if not gm.rootTracker.containsRoot(p.root):
-            # Defensive: if the proof's root somehow isn't in the unified
-            # roots window (shouldn't happen — same on-chain read), still
-            # add it so self-verify accepts proofs we just generated.
+            # Defensive: same on-chain read should already include `root`,
+            # but add it so self-verify accepts proofs we just generated.
             gm.rootTracker.addRoot(p.root)
             debug "Proof root missing from unified validRoots; added",
               proofRoot = p.root.toHex()

@@ -306,12 +306,10 @@ method generateProof*(
 
   sp.messageIdCounter += 1
 
-  # Self-verify the proof we just generated before handing it out.
-  # Catches membership/leaf mismatches (e.g. gifter assigned us a leafIndex
-  # that already holds another node's commitment due to a registration race)
-  # and stale-root cases (our cachedProof references a root not yet in our
-  # own validRoots window). Lets the publish path fail-fast locally instead
-  # of shipping a proof that mix relays will silently drop.
+  # Self-verify: catches leafIndex collisions (e.g. gifter assigned a slot
+  # that already holds another commitment due to a registration race) and
+  # stale-root cases. Fail-fast locally rather than ship a proof that mix
+  # relays will silently drop.
   let selfVerify = sp.groupManager.verifyProof(
     proof, bindingData, sp.config.rlnIdentifier
   )
