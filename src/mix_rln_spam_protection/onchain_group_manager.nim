@@ -193,25 +193,19 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
         if proofResult.isOk:
           let p = proofResult.get()
           gm.cachedProof = some(p)
-          if p.validRoots.len > 0:
-            # Reset so we don't carry over a stale snapshot from a prior poll
-            # whose roots were dropped on chain.
-            gm.rootTracker.resetRoots()
-            for r in p.validRoots:
-              gm.rootTracker.addRoot(r)
-            if not gm.rootTracker.containsRoot(p.root):
-              # Defensive: if the proof's root somehow isn't in the unified
-              # roots window (shouldn't happen — same on-chain read), still
-              # add it so self-verify accepts proofs we just generated.
-              gm.rootTracker.addRoot(p.root)
-              debug "Proof root missing from unified validRoots; added",
-                proofRoot = p.root.toHex()
-          else:
-            # Older RPC response shape (no valid_roots field). Track the
-            # proof's root locally — fetchRoots above already populated the
-            # general window.
-            if not gm.rootTracker.containsRoot(p.root):
-              gm.rootTracker.addRoot(p.root)
+          # Reset so we don't carry over a stale snapshot from a prior poll
+          # whose roots were dropped on chain. The unified RPC always returns
+          # validRoots atomically with the proof.
+          gm.rootTracker.resetRoots()
+          for r in p.validRoots:
+            gm.rootTracker.addRoot(r)
+          if not gm.rootTracker.containsRoot(p.root):
+            # Defensive: if the proof's root somehow isn't in the unified
+            # roots window (shouldn't happen — same on-chain read), still
+            # add it so self-verify accepts proofs we just generated.
+            gm.rootTracker.addRoot(p.root)
+            debug "Proof root missing from unified validRoots; added",
+              proofRoot = p.root.toHex()
           trace "Cached merkle proof from LEZ",
             pathElementsLen = p.pathElements.len,
             unifiedRootsCount = p.validRoots.len
