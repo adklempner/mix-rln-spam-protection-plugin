@@ -29,6 +29,12 @@ type
     pathElements*: seq[byte]
     identityPathIndex*: seq[byte]
     root*: MerkleNode
+    # validRoots: roots window read from the SAME on-chain main account that
+    # produced this proof. Populated atomically by the RLN module's
+    # get_merkle_proofs RPC, so consumers can refresh their local rootTracker
+    # without a follow-up get_valid_roots that could race against a fresh
+    # registration tx and return a window that no longer contains `root`.
+    validRoots*: seq[MerkleNode]
 
   OnchainLEZGroupManager* = ref object of GroupManager
     fetchRoots: FetchRootsCallback
@@ -146,6 +152,16 @@ method generateProof*(
     gm.userMessageLimit,
   )
 
+proc proofRoot*(gm: OnchainLEZGroupManager): Option[MerkleNode] =
+  ## Root our next-generated proof will reference. None until first poll lands.
+  if gm.cachedProof.isSome:
+    some(gm.cachedProof.get().root)
+  else:
+    none(MerkleNode)
+
+proc getPollInterval*(gm: OnchainLEZGroupManager): Duration =
+  gm.pollInterval
+
 {.pop.}
 
 proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
@@ -165,14 +181,40 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
     except CatchableError as e:
       debug "Exception fetching roots", error = e.msg
 
-    # Fetch merkle proof for our membership index
+    # Fetch merkle proof for our membership index. The RPC now returns
+    # validRoots atomically (read from the same on-chain main account that
+    # produced the proof), so we refresh the local rootTracker from this
+    # response instead of relying on the separate fetchRoots call above —
+    # which can race against an intervening registration tx and return a
+    # roots window that no longer contains the root encoded in the proof.
     if gm.membershipIndex.isSome:
       try:
         let proofResult = await gm.fetchProof(gm.membershipIndex.get())
         if proofResult.isOk:
-          gm.cachedProof = some(proofResult.get())
+          let p = proofResult.get()
+          gm.cachedProof = some(p)
+          if p.validRoots.len > 0:
+            # Reset so we don't carry over a stale snapshot from a prior poll
+            # whose roots were dropped on chain.
+            gm.rootTracker.resetRoots()
+            for r in p.validRoots:
+              gm.rootTracker.addRoot(r)
+            if not gm.rootTracker.containsRoot(p.root):
+              # Defensive: if the proof's root somehow isn't in the unified
+              # roots window (shouldn't happen — same on-chain read), still
+              # add it so self-verify accepts proofs we just generated.
+              gm.rootTracker.addRoot(p.root)
+              debug "Proof root missing from unified validRoots; added",
+                proofRoot = p.root.toHex()
+          else:
+            # Older RPC response shape (no valid_roots field). Track the
+            # proof's root locally — fetchRoots above already populated the
+            # general window.
+            if not gm.rootTracker.containsRoot(p.root):
+              gm.rootTracker.addRoot(p.root)
           trace "Cached merkle proof from LEZ",
-            pathElementsLen = proofResult.get().pathElements.len
+            pathElementsLen = p.pathElements.len,
+            unifiedRootsCount = p.validRoots.len
         else:
           debug "Failed to fetch merkle proof from LEZ", error = proofResult.error
       except CatchableError as e:

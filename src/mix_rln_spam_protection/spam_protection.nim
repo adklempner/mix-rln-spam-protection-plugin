@@ -7,7 +7,7 @@
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
 
-import std/options
+import std/[options, sequtils]
 import chronos
 import results
 import chronicles
@@ -305,6 +305,33 @@ method generateProof*(
     return err("Failed to generate proof: " & error)
 
   sp.messageIdCounter += 1
+
+  # Self-verify the proof we just generated before handing it out.
+  # Catches membership/leaf mismatches (e.g. gifter assigned us a leafIndex
+  # that already holds another node's commitment due to a registration race)
+  # and stale-root cases (our cachedProof references a root not yet in our
+  # own validRoots window). Lets the publish path fail-fast locally instead
+  # of shipping a proof that mix relays will silently drop.
+  let selfVerify = sp.groupManager.verifyProof(
+    proof, bindingData, sp.config.rlnIdentifier
+  )
+  if selfVerify.isErr:
+    let validRootsHex = sp.groupManager.rootTracker.getValidRoots().mapIt(it.toHex())
+    error "Self-verify of generated proof errored",
+      err = selfVerify.error,
+      proofRoot = proof.merkleRoot.toHex(),
+      ourValidRootsCount = validRootsHex.len,
+      ourValidRoots = validRootsHex,
+      rootInOurWindow = sp.groupManager.validateRoot(proof.merkleRoot)
+    return err("Self-verify errored: " & selfVerify.error)
+  if not selfVerify.get():
+    let validRootsHex = sp.groupManager.rootTracker.getValidRoots().mapIt(it.toHex())
+    error "Self-verify rejected our just-generated proof — membership likely stale or leafIndex collided",
+      proofRoot = proof.merkleRoot.toHex(),
+      ourValidRootsCount = validRootsHex.len,
+      ourValidRoots = validRootsHex,
+      rootInOurWindow = sp.groupManager.validateRoot(proof.merkleRoot)
+    return err("Self-verify rejected just-generated proof")
 
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
