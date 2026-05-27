@@ -39,6 +39,11 @@ type
     fetchProof: FetchProofCallback
     pollInterval: Duration
     cachedProof: Option[ExternalMerkleProof]
+    # Set once the gifter status watcher confirms our registration tx has
+    # landed on-chain. Used by the pre-publish gate to wait a post-confirm
+    # cushion so peers have time to poll the new root before we ship a
+    # proof that references it.
+    membershipConfirmedAt: Option[Moment]
 
 proc new*(
     T: typedesc[OnchainLEZGroupManager],
@@ -159,6 +164,15 @@ proc proofRoot*(gm: OnchainLEZGroupManager): Option[MerkleNode] =
 
 proc getPollInterval*(gm: OnchainLEZGroupManager): Duration =
   gm.pollInterval
+
+proc markMembershipConfirmed*(gm: OnchainLEZGroupManager) =
+  ## Record the time the registration tx confirmed on-chain. Idempotent —
+  ## later calls don't move the timestamp.
+  if gm.membershipConfirmedAt.isNone:
+    gm.membershipConfirmedAt = some(Moment.now())
+
+proc membershipConfirmedAt*(gm: OnchainLEZGroupManager): Option[Moment] =
+  gm.membershipConfirmedAt
 
 {.pop.}
 
