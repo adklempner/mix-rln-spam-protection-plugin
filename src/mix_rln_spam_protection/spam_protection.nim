@@ -334,7 +334,7 @@ method generateProof*(
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  debug "Generated RLN proof successfully",
+  info "Generated RLN proof successfully",
     epoch = epochToUint64(epoch),
     messageId = sp.messageIdCounter - 1
 
@@ -510,7 +510,7 @@ method verifyProof*(
     let data = broadcast.toBytes()
     asyncSpawn sp.publishCallback.get()(sp.config.proofMetadataContentTopic, data)
 
-  debug "Proof verified successfully",
+  info "Proof verified successfully",
     epoch = epochToUint64(proof.epoch),
     nullifier = proof.nullifier[0 .. 7].toHex() & "..."
 
