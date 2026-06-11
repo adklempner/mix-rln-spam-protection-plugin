@@ -15,11 +15,11 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used directly for protobuf/minprotobuf and varint
-requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
-
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
-requires "https://github.com/adklempner/nim-libp2p-mix.git#48b2e3b"
+# nim-libp2p — used for protobuf/minprotobuf/varint AND mix code (pre-extraction
+# bundled layout at libp2p/protocols/mix/*). Pinned to match logos-delivery's
+# nim-libp2p pin so liblogosdelivery and this plugin compile against the same
+# libp2p version (avoids "Two SpamProtection candidates" symbol conflicts).
+requires "https://github.com/vacp2p/nim-libp2p.git#ff8d51857b4b79a68468e7bcc27b2026cca02996"
 
 # Tasks
 task test, "Run tests":

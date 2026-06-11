@@ -13,8 +13,12 @@ import results
 import chronicles
 import stew/endians2
 
-# Import libp2p_mix spam protection interface
-import libp2p_mix/spam_protection as libp2p_spam
+# Inherit from libp2p's bundled mix spam protection interface (pre-extraction
+# nim-libp2p, where mix code lives at libp2p/protocols/mix/*). ff8d518's
+# interface uses Result[seq[byte], string] for generateProof and does not
+# carry a ProofResult.token / epoch-callback layer — we keep messageId-token
+# reclamation purely internal.
+import libp2p/protocols/mix/spam_protection as libp2p_spam
 
 import ./types
 import ./constants
@@ -351,7 +355,7 @@ func decode(T: type ProofToken, bytes: openArray[byte]): Result[ProofToken, stri
 
 method generateProof*(
     sp: MixRlnSpamProtection, bindingData: seq[byte]
-): Result[libp2p_spam.ProofResult, string] {.gcsafe, raises: [].} =
+): Result[seq[byte], string] {.gcsafe, raises: [].} =
   ## Generate an RLN proof bound to the given packet data.
   ##
   ## For per-hop generation, bindingData is the outgoing Sphinx packet.
@@ -425,20 +429,10 @@ method generateProof*(
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  # Encode epoch + messageId + merkleRoot as opaque token.
-  # The epoch qualifier is critical for safe reclaim: a token built in
-  # epoch N must NOT be reclaimed into epoch N+1's freed pool, or the same
-  # (epoch, messageId) pair could be issued twice in N+1, causing an RLN
-  # double-signal (slashing risk).
-  let
-    epochU64 = epochToUint64(epoch)
-    token = ProofToken(
-      epoch: epochU64, messageId: msgId.uint64, merkleRoot: proof.merkleRoot
-    ).encode()
+  info "Generated RLN proof successfully",
+    epoch = epochToUint64(epoch), messageId = msgId
 
-  info "Generated RLN proof successfully", epoch = epochU64, messageId = msgId
-
-  ok(libp2p_spam.ProofResult(proof: serialized, token: token))
+  ok(serialized)
 
 method reclaimProofToken*(
     sp: MixRlnSpamProtection, token: seq[byte]
