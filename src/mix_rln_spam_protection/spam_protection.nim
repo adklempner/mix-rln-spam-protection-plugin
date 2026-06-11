@@ -198,12 +198,13 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   ok()
 
 proc advanceEpoch(sp: MixRlnSpamProtection, epoch: Epoch) =
-  ## Reset all per-epoch state and notify listeners. Centralised so any new
-  ## per-epoch field (counters, pools, caches) only needs to be cleared here.
+  ## Reset all per-epoch state. Centralised so any new per-epoch field
+  ## (counters, pools, caches) only needs to be cleared here.
+  ## ff8d518's bundled mix doesn't carry epoch-change callbacks — drop the
+  ## listener notification (was a libp2p_mix-only abstraction).
   sp.messageIdCounter = 0
   sp.freedMessageIds.clear()
   sp.lastEpoch = epoch
-  sp.notifyEpochChange(epochToUint64(epoch))
 
 proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError]).} =
   ## Background timer that detects epoch boundaries and fires OnEpochChange
