@@ -411,12 +411,24 @@ method generateProof*(
   )
   if selfVerify.isErr:
     let validRootsHex = sp.groupManager.rootTracker.getValidRoots().mapIt(it.toHex())
+    # Diagnostic: at the moment of failure, dump both views of the tracker.
+    # The deque (via getValidRoots) and the rootSet (via containsRoot) MUST
+    # agree on what's in the window — if they don't, the bug is inside
+    # MerkleRootTracker, not at the pollLoop / get_merkle_proofs layer.
+    let dequeLen = sp.groupManager.rootTracker.dequeLen()
+    let setLen = sp.groupManager.rootTracker.rootSetLen()
+    let setHasProofRoot = sp.groupManager.rootTracker.rootSetContains(proof.merkleRoot)
+    let dequeHasProofRoot = validRootsHex.contains(proof.merkleRoot.toHex())
     error "Self-verify of generated proof errored",
       err = selfVerify.error,
       proofRoot = proof.merkleRoot.toHex(),
       ourValidRootsCount = validRootsHex.len,
       ourValidRoots = validRootsHex,
-      rootInOurWindow = sp.groupManager.validateRoot(proof.merkleRoot)
+      rootInOurWindow = sp.groupManager.validateRoot(proof.merkleRoot),
+      dequeLen = dequeLen,
+      rootSetLen = setLen,
+      setHasProofRoot = setHasProofRoot,
+      dequeHasProofRoot = dequeHasProofRoot
     return err("Self-verify errored: " & selfVerify.error)
   if not selfVerify.get():
     let validRootsHex = sp.groupManager.rootTracker.getValidRoots().mapIt(it.toHex())

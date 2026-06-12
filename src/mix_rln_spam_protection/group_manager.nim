@@ -103,11 +103,26 @@ proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
     tracker.rootSet.excl(oldRoot)
   tracker.validRoots.addLast(root)
   tracker.rootSet.incl(root)
+  # Diagnostic: deque and rootSet must always have the same cardinality.
+  # If they desync, containsRoot (using rootSet) can disagree with the
+  # actual deque contents — which would explain the self-verify failures
+  # where p.root is supposedly in p.validRoots but tracker.containsRoot
+  # later returns false (the post-poll observed contradiction).
+  if tracker.validRoots.len != tracker.rootSet.len:
+    info "MerkleRootTracker addRoot desync detected",
+      action = "addRoot",
+      added = root.toHex(),
+      dequeLen = tracker.validRoots.len,
+      rootSetLen = tracker.rootSet.len
 
 proc resetRoots*(tracker: MerkleRootTracker) =
   ## Drop all tracked roots.
   tracker.validRoots = initDeque[MerkleNode]()
   tracker.rootSet = initHashSet[MerkleNode]()
+  if tracker.validRoots.len != 0 or tracker.rootSet.len != 0:
+    info "MerkleRootTracker resetRoots desync detected",
+      dequeLen = tracker.validRoots.len,
+      rootSetLen = tracker.rootSet.len
 
 proc resetToRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
   ## Replace the valid root window with a single root.
@@ -127,6 +142,23 @@ proc getValidRoots*(tracker: MerkleRootTracker): seq[MerkleNode] =
   result = newSeq[MerkleNode](tracker.validRoots.len)
   for i, r in tracker.validRoots:
     result[i] = r
+
+proc dequeLen*(tracker: MerkleRootTracker): int =
+  ## Size of the internal validRoots deque. Exposed only so callers can
+  ## compare against `rootSetLen` to spot deque/rootSet desync — they should
+  ## always equal each other.
+  tracker.validRoots.len
+
+proc rootSetLen*(tracker: MerkleRootTracker): int =
+  ## Size of the internal rootSet HashSet. See `dequeLen`.
+  tracker.rootSet.len
+
+proc rootSetContains*(tracker: MerkleRootTracker, root: MerkleNode): bool =
+  ## O(1) rootSet membership check. Identical to `containsRoot`; exposed
+  ## separately so failure-site diagnostics can compare against an
+  ## independently-derived deque membership check (i.e. `getValidRoots()`
+  ## contains check) to spot tracker internal desync.
+  root in tracker.rootSet
 
 proc updateFromInstance*(
     tracker: MerkleRootTracker, instance: RLNInstance
