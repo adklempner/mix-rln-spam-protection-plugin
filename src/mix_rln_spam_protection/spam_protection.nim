@@ -419,7 +419,7 @@ method generateProof*(
     let setLen = sp.groupManager.rootTracker.rootSetLen()
     let setHasProofRoot = sp.groupManager.rootTracker.rootSetContains(proof.merkleRoot)
     let dequeHasProofRoot = validRootsHex.contains(proof.merkleRoot.toHex())
-    error "Self-verify of generated proof errored",
+    error "Self-verify of generated proof errored [v2-fields]",
       err = selfVerify.error,
       proofRoot = proof.merkleRoot.toHex(),
       ourValidRootsCount = validRootsHex.len,
