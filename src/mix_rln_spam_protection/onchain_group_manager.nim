@@ -144,7 +144,7 @@ method generateProof*(
     pathElementsLen = proof.pathElements.len,
     pathIndexLen = proof.identityPathIndex.len
 
-  gm.rlnInstance.generateRlnProofWithExternalWitness(
+  let r = gm.rlnInstance.generateRlnProofWithExternalWitness(
     proof.pathElements,
     proof.identityPathIndex,
     creds,
@@ -154,6 +154,22 @@ method generateProof*(
     messageId,
     gm.userMessageLimit,
   )
+  # Diagnostic: cachedProof.root is what LEZ TOLD us the witness anchors to;
+  # proof.merkleRoot is what Zerokit COMPUTED from (pathElements, leaf, path).
+  # If these differ, the LEZ FFI returned an internally inconsistent
+  # (root, pathElements) pair — server-side multi-fetch staleness. Logging at
+  # info so it always lands in the .lgx-bundled build's chronicles output.
+  if r.isOk:
+    let p = r.get()
+    if p.merkleRoot != proof.root:
+      info "LEZ proof root vs witness-implied root MISMATCH",
+        cachedRoot = proof.root.toHex(),
+        computedRoot = p.merkleRoot.toHex(),
+        pathLen = proof.pathElements.len
+    else:
+      trace "LEZ proof root matches witness-implied root",
+        root = proof.root.toHex()
+  r
 
 proc proofRoot*(gm: OnchainLEZGroupManager): Option[MerkleNode] =
   ## Root our next-generated proof will reference. None until first poll lands.
