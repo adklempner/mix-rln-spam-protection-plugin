@@ -39,6 +39,14 @@ type
     fetchProof: FetchProofCallback
     pollInterval: Duration
     cachedProof: Option[ExternalMerkleProof]
+    # Stamp set whenever pollLoop's fetchProof leg succeeds and cachedProof
+    # is replaced. Used by generateProof to refuse shipping a proof built
+    # from a cachedProof older than `2 * pollInterval`: under healthy RPC
+    # the next successful poll should always have refreshed within one
+    # interval, so >2x means polls have been silently stalling and the
+    # cached (cachedProof, rootTracker) pair is stale enough to risk
+    # carrying a multi-fetch-race-poisoned snapshot from get_merkle_proofs.
+    cachedProofRefreshedAt: Option[Moment]
     # Set once the gifter status watcher confirms our registration tx has
     # landed on-chain. Used by the pre-publish gate to wait a post-confirm
     # cushion so peers have time to poll the new root before we ship a
@@ -136,6 +144,25 @@ method generateProof*(
   if not gm.isReady():
     return err("OnchainLEZ group manager not ready")
 
+  # Staleness gate: refuse to ship a proof built from a cachedProof whose
+  # last refresh predates `2 * pollInterval`. Under healthy RPC the poll
+  # cadence guarantees a refresh every `pollInterval` (~10s default); >2x
+  # means polls have stalled, leaving a (cachedProof, rootTracker) pair
+  # that may carry a multi-fetch-race poisoned snapshot from a prior
+  # get_merkle_proofs response. Better to fail closed and let mix_protocol
+  # drop the packet at this hop than to ship a self-verify-failing proof
+  # that the next hop will also drop.
+  if gm.cachedProofRefreshedAt.isSome:
+    let age = Moment.now() - gm.cachedProofRefreshedAt.get()
+    let threshold = gm.pollInterval * 2
+    if age > threshold:
+      warn "OnchainLEZ cachedProof staleness threshold exceeded; refusing",
+        ageMs = age.milliseconds, thresholdMs = threshold.milliseconds
+      return err(
+        "cachedProof stale (>" & $threshold.milliseconds &
+        "ms since last successful pollLoop refresh)"
+      )
+
   let creds = gm.credentials.get()
   let proof = gm.cachedProof.get()
 
@@ -222,6 +249,8 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
       if proofResult.isOk:
         let p = proofResult.get()
         gm.cachedProof = some(p)
+        # Stamp the refresh moment so generateProof can gate on staleness.
+        gm.cachedProofRefreshedAt = some(Moment.now())
         gm.rootTracker.resetRoots()
         for r in p.validRoots:
           gm.rootTracker.addRoot(r)
@@ -229,8 +258,13 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
           # Defensive: same on-chain read should already include `root`,
           # but add it so self-verify accepts proofs we just generated.
           gm.rootTracker.addRoot(p.root)
-          debug "Proof root missing from unified validRoots; added",
-            proofRoot = p.root.toHex()
+          # Promote to info so .lgx-bundled chronicles surfaces it: when
+          # this fires, the get_merkle_proofs JSON returned `root` and
+          # `validRoots` from different chain snapshots — direct evidence
+          # of the C++ multi-fetch race in LogosRlnModule::get_merkle_proofs.
+          info "Proof root missing from unified validRoots; added defensively",
+            proofRoot = p.root.toHex(),
+            validRootsCount = p.validRoots.len
         trace "Cached merkle proof from LEZ",
           pathElementsLen = p.pathElements.len,
           unifiedRootsCount = p.validRoots.len
