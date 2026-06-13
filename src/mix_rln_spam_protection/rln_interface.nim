@@ -590,7 +590,7 @@ proc membershipKeyGen*(): RlnResult[IdentityCredential] =
 proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
   var seedVec = toVecUint8(seed)
   let res = ffi_seeded_extended_key_gen(addr seedVec)
-  if hasError(res.err):
+  if res.ok.dataPtr.isNil and hasError(res.err):
     return err(consumeError("Seeded key generation failed: ", res.err))
   defer:
     ffi_vec_cfr_free(res.ok)
