@@ -107,8 +107,8 @@ proc computeExternalNullifier*(
 proc ffi_cfr_free(cfr: ptr CFr) {.importc: "ffi_cfr_free", cdecl.}
 proc ffi_cfr_to_bytes_le(cfr: ptr CFr): Vec_uint8 {.importc: "ffi_cfr_to_bytes_le", cdecl.}
 proc ffi_bytes_le_to_cfr(bytes: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_bytes_le_to_cfr", cdecl.}
-proc ffi_hash_to_field_le(input: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_hash_to_field_le", cdecl.}
-proc ffi_poseidon_hash_pair(a: ptr CFr, b: ptr CFr): CResultCFrPtrVecU8 {.importc: "ffi_poseidon_hash_pair", cdecl.}
+proc ffi_hash_to_field_le(input: ptr Vec_uint8): ptr CFr {.importc: "ffi_hash_to_field_le", cdecl.}
+proc ffi_poseidon_hash_pair(a: ptr CFr, b: ptr CFr): ptr CFr {.importc: "ffi_poseidon_hash_pair", cdecl.}
 
 proc ffi_vec_cfr_new(capacity: CSize): Vec_CFr {.importc: "ffi_vec_cfr_new", cdecl.}
 proc ffi_vec_cfr_push(v: ptr Vec_CFr, cfr: ptr CFr) {.importc: "ffi_vec_cfr_push", cdecl.}
@@ -118,8 +118,8 @@ proc ffi_vec_cfr_free(v: Vec_CFr) {.importc: "ffi_vec_cfr_free", cdecl.}
 proc ffi_vec_u8_free(v: Vec_uint8) {.importc: "ffi_vec_u8_free", cdecl.}
 proc ffi_c_string_free(s: Vec_uint8) {.importc: "ffi_c_string_free", cdecl.}
 
-proc ffi_extended_key_gen(): CResultVecCFrVecU8 {.importc: "ffi_extended_key_gen", cdecl.}
-proc ffi_seeded_extended_key_gen(seed: ptr Vec_uint8): CResultVecCFrVecU8 {.importc: "ffi_seeded_extended_key_gen", cdecl.}
+proc ffi_extended_key_gen(): Vec_CFr {.importc: "ffi_extended_key_gen", cdecl.}
+proc ffi_seeded_extended_key_gen(seed: ptr Vec_uint8): Vec_CFr {.importc: "ffi_seeded_extended_key_gen", cdecl.}
 
 proc ffi_rln_new(treeDepth: CSize, config: cstring): CResultRLNPtrVecU8 {.importc: "ffi_rln_new", cdecl.}
 proc ffi_rln_new_with_params(
@@ -292,10 +292,10 @@ proc bytesToCfrLe(data: openArray[byte]): RlnResult[ptr CFr] =
 
 proc hashToFieldLe(data: openArray[byte]): RlnResult[ptr CFr] =
   var vec = toVecUint8(data)
-  let res = ffi_hash_to_field_le(addr vec)
-  if not res.ok.isNil:
-    return ok(res.ok)
-  err(consumeError("Failed to hash to field: ", res.err))
+  let resPtr = ffi_hash_to_field_le(addr vec)
+  if not resPtr.isNil:
+    return ok(resPtr)
+  err("Failed to hash to field: ffi returned null")
 
 proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   let aPtr = bytesToCfrLe(a).valueOr:
@@ -308,13 +308,13 @@ proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   defer:
     ffi_cfr_free(bPtr)
 
-  let res = ffi_poseidon_hash_pair(aPtr, bPtr)
-  if res.ok.isNil:
-    return err(consumeError("Poseidon hash failed: ", res.err))
+  let resPtr = ffi_poseidon_hash_pair(aPtr, bPtr)
+  if resPtr.isNil:
+    return err("Poseidon hash failed: ffi returned null")
   defer:
-    ffi_cfr_free(res.ok)
+    ffi_cfr_free(resPtr)
 
-  cfrToBytesLe(res.ok)
+  cfrToBytesLe(resPtr)
 
 proc cfrResultToBytes(res: CResultCFrPtrVecU8, prefix: string): RlnResult[array[32, byte]] =
   if res.ok.isNil:
@@ -560,21 +560,21 @@ proc buildWitness(
   ok(witnessRes.ok)
 
 proc membershipKeyGen*(): RlnResult[IdentityCredential] =
-  let res = ffi_extended_key_gen()
-  if hasError(res.err):
-    return err(consumeError("Key generation failed: ", res.err))
+  var resVec = ffi_extended_key_gen()
+  if resVec.dataPtr.isNil:
+    return err("Key generation failed: ffi returned empty vec")
   defer:
-    ffi_vec_cfr_free(res.ok)
+    ffi_vec_cfr_free(resVec)
 
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
+  if int(ffi_vec_cfr_len(addr resVec)) != 4:
     return err("Unexpected credential element count")
 
   var cred: IdentityCredential
   let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
+    ffi_vec_cfr_get(addr resVec, 0),
+    ffi_vec_cfr_get(addr resVec, 1),
+    ffi_vec_cfr_get(addr resVec, 2),
+    ffi_vec_cfr_get(addr resVec, 3),
   ]
   for field in fields:
     if field.isNil:
@@ -589,21 +589,21 @@ proc membershipKeyGen*(): RlnResult[IdentityCredential] =
 
 proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
   var seedVec = toVecUint8(seed)
-  let res = ffi_seeded_extended_key_gen(addr seedVec)
-  if res.ok.dataPtr.isNil and hasError(res.err):
-    return err(consumeError("Seeded key generation failed: ", res.err))
+  var resVec = ffi_seeded_extended_key_gen(addr seedVec)
+  if resVec.dataPtr.isNil:
+    return err("Seeded key generation failed: ffi returned empty vec")
   defer:
-    ffi_vec_cfr_free(res.ok)
+    ffi_vec_cfr_free(resVec)
 
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
+  if int(ffi_vec_cfr_len(addr resVec)) != 4:
     return err("Unexpected credential element count")
 
   var cred: IdentityCredential
   let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
+    ffi_vec_cfr_get(addr resVec, 0),
+    ffi_vec_cfr_get(addr resVec, 1),
+    ffi_vec_cfr_get(addr resVec, 2),
+    ffi_vec_cfr_get(addr resVec, 3),
   ]
   for field in fields:
     if field.isNil:
