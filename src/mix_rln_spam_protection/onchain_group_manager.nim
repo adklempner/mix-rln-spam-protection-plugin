@@ -6,7 +6,7 @@
 ## RLN module's callback bridge. Does NOT maintain a local tree — proof
 ## generation uses external witnesses from LEZ directly.
 
-import std/[options]
+import std/[options, locks]
 import chronos
 import results
 import chronicles
@@ -44,6 +44,15 @@ type
     # cushion so peers have time to poll the new root before we ship a
     # proof that references it.
     membershipConfirmedAt: Option[Moment]
+    # Guards against spawning the poll loop more than once (the mix-mount
+    # factory autostarts it; a later libp2p_mix_rln_start_polling is a no-op).
+    isPolling: bool
+    # Guards cachedProof/credentials/membershipIndex against the cross-thread
+    # race: the host writes them from the Qt thread (setCachedProof /
+    # setCredential) while the libp2p thread reads them in isReady/generateProof.
+    # The rootTracker has its own lock; setCachedProof nests them (stateLock
+    # outer) so (cachedProof, rootTracker) update atomically together.
+    stateLock: Lock
 
 proc new*(
     T: typedesc[OnchainLEZGroupManager],
@@ -51,7 +60,7 @@ proc new*(
     userMessageLimit: uint64 = UserMessageLimit,
     pollInterval: Duration = seconds(10),
 ): T =
-  T(
+  result = T(
     rlnInstance: rlnInstance,
     userMessageLimit: userMessageLimit,
     rootTracker: newMerkleRootTracker(),
@@ -59,6 +68,7 @@ proc new*(
     isInitialized: false,
     isSynced: false,
   )
+  result.stateLock.initLock()
 
 proc setFetchCallbacks*(
     gm: OnchainLEZGroupManager,
@@ -91,9 +101,32 @@ method start*(gm: OnchainLEZGroupManager): Future[RlnResult[void]] {.async.} =
 
 proc startPolling*(gm: OnchainLEZGroupManager) =
   ## Start the background poll loop. Call AFTER the node is fully started
-  ## to avoid interfering with switch.start().
-  if gm.isSynced and gm.fetchRoots != nil:
+  ## to avoid interfering with switch.start(). Idempotent.
+  if gm.isSynced and gm.fetchRoots != nil and not gm.isPolling:
+    gm.isPolling = true
     asyncSpawn gm.pollLoop()
+
+proc setCachedProof*(gm: OnchainLEZGroupManager, p: ExternalMerkleProof) =
+  ## Push a merkle proof fetched by the host (on its own thread) directly into
+  ## the GM, mirroring the poll loop's caching. Avoids the libp2p-thread
+  ## cross-module fetch deadlock — the host fetches on the Qt thread and pushes.
+  ## Held under stateLock (cachedProof) with rootTracker.rebuildRoots nested so
+  ## a concurrent libp2p-thread reader never sees a half-applied (proof, roots).
+  withLock gm.stateLock:
+    gm.cachedProof = some(p)
+    gm.rootTracker.rebuildRoots(p.validRoots, p.root)
+
+proc setCredential*(
+    gm: OnchainLEZGroupManager, idSecretHash: IDSecretHash, leaf: int64
+) =
+  ## Set the RLN credential + membership leaf from the host (Qt thread). Guarded
+  ## so the libp2p-thread readiness/proof readers never observe a torn write.
+  withLock gm.stateLock:
+    var cred = IdentityCredential()
+    cred.idSecretHash = idSecretHash
+    gm.credentials = some(cred)
+    if leaf >= 0:
+      gm.membershipIndex = some(MembershipIndex(leaf))
 
 method stop*(gm: OnchainLEZGroupManager): Future[void] {.async.} =
   gm.isSynced = false
@@ -117,9 +150,10 @@ method withdraw*(
 
 method isReady*(gm: OnchainLEZGroupManager): bool =
   ## Ready for proof GENERATION (needs credentials + cached proof from LEZ).
-  gm.isInitialized and gm.isSynced and
-    gm.credentials.isSome and gm.membershipIndex.isSome and
-    gm.cachedProof.isSome
+  withLock gm.stateLock:
+    result =
+      gm.isInitialized and gm.isSynced and gm.credentials.isSome and
+      gm.membershipIndex.isSome and gm.cachedProof.isSome
 
 method isReadyForVerification*(gm: OnchainLEZGroupManager): bool =
   ## Ready for proof VERIFICATION (only needs to be initialized and synced).
@@ -133,14 +167,24 @@ method generateProof*(
     rlnIdentifier: RlnIdentifier,
     messageId: uint = 0,
 ): RlnResult[RateLimitProof] =
-  if not gm.isReady():
-    return err("OnchainLEZ group manager not ready")
-
-  let creds = gm.credentials.get()
-  let proof = gm.cachedProof.get()
+  # Snapshot the credential + proof under the lock (the readiness check is
+  # inlined here rather than calling isReady() to avoid re-acquiring the
+  # non-reentrant stateLock), then do the RLN math outside the lock.
+  var creds: IdentityCredential
+  var proof: ExternalMerkleProof
+  var mIndex: MembershipIndex
+  withLock gm.stateLock:
+    if not (
+      gm.isInitialized and gm.isSynced and gm.credentials.isSome and
+      gm.membershipIndex.isSome and gm.cachedProof.isSome
+    ):
+      return err("OnchainLEZ group manager not ready")
+    creds = gm.credentials.get()
+    proof = gm.cachedProof.get()
+    mIndex = gm.membershipIndex.get()
 
   trace "Generating proof with external LEZ witness",
-    membershipIndex = gm.membershipIndex.get(),
+    membershipIndex = mIndex,
     pathElementsLen = proof.pathElements.len,
     pathIndexLen = proof.identityPathIndex.len
 
@@ -157,10 +201,11 @@ method generateProof*(
 
 proc proofRoot*(gm: OnchainLEZGroupManager): Option[MerkleNode] =
   ## Root our next-generated proof will reference. None until first poll lands.
-  if gm.cachedProof.isSome:
-    some(gm.cachedProof.get().root)
-  else:
-    none(MerkleNode)
+  withLock gm.stateLock:
+    if gm.cachedProof.isSome:
+      result = some(gm.cachedProof.get().root)
+    else:
+      result = none(MerkleNode)
 
 proc getPollInterval*(gm: OnchainLEZGroupManager): Duration =
   gm.pollInterval
@@ -205,16 +250,11 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
       let proofResult = await gm.fetchProof(gm.membershipIndex.get())
       if proofResult.isOk:
         let p = proofResult.get()
-        gm.cachedProof = some(p)
-        gm.rootTracker.resetRoots()
-        for r in p.validRoots:
-          gm.rootTracker.addRoot(r)
-        if not gm.rootTracker.containsRoot(p.root):
-          # Defensive: same on-chain read should already include `root`,
-          # but add it so self-verify accepts proofs we just generated.
-          gm.rootTracker.addRoot(p.root)
-          debug "Proof root missing from unified validRoots; added",
-            proofRoot = p.root.toHex()
+        # Same atomic (cachedProof, rootTracker) update as setCachedProof so a
+        # concurrent reader never sees a half-rebuilt window.
+        withLock gm.stateLock:
+          gm.cachedProof = some(p)
+          gm.rootTracker.rebuildRoots(p.validRoots, p.root)
         trace "Cached merkle proof from LEZ",
           pathElementsLen = p.pathElements.len,
           unifiedRootsCount = p.validRoots.len

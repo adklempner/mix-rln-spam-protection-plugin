@@ -1,0 +1,67 @@
+{
+  "nodes": {
+    "libp2p_mix": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1783127842,
+        "narHash": "sha256-ZiL68mRuCOddqG93UZp41Ztht29SfQPC2LI07UElvao=",
+        "ref": "rebase/mix-cbind",
+        "rev": "54e61254b0fb11400b92b304c52108145a2248d6",
+        "revCount": 90,
+        "type": "git",
+        "url": "file:///Users/arseniy/Waku/Logos/nim-libp2p-mix"
+      },
+      "original": {
+        "ref": "rebase/mix-cbind",
+        "type": "git",
+        "url": "file:///Users/arseniy/Waku/Logos/nim-libp2p-mix"
+      }
+    },
+    "logos_rln_gifter": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783131941,
+        "narHash": "sha256-JrKE6EHQcQKj+MLkeGKeUFSp/hYqUVxxXcrjZlJfyhk=",
+        "ref": "master",
+        "rev": "9793e0be628fde067582ac92f8fa3a3ed460693d",
+        "revCount": 1,
+        "type": "git",
+        "url": "file:///Users/arseniy/Waku/Logos/logos-rln-gifter"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "file:///Users/arseniy/Waku/Logos/logos-rln-gifter"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1767313136,
+        "narHash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-25.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "libp2p_mix": "libp2p_mix",
+        "logos_rln_gifter": "logos_rln_gifter",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

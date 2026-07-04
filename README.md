@@ -133,11 +133,11 @@ nim c --passL:librln.a --passL:-lm src/mix_rln_spam_protection.nim
 
 # Run tests
 nim c -r --passL:librln.a --passL:-lm tests/test_all.nim
+```
 
-The plugin now uses zerokit v2's partial-proof APIs. After membership or root
+The plugin uses zerokit v2's partial-proof APIs. After membership or root
 changes, it refreshes a cached partial proof for the local member and uses that
 cache during normal proof generation when the current root still matches.
-```
 
 ## Configuration
 

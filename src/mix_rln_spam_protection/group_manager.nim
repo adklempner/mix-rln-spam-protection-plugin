@@ -13,7 +13,7 @@
 ## This design allows swapping the membership backend without changing the
 ## spam protection logic.
 
-import std/[tables, deques, options, hashes, sets]
+import std/[tables, deques, options, hashes, sets, locks]
 import chronos
 import results
 import chronicles
@@ -47,6 +47,12 @@ type
     validRoots: Deque[MerkleNode] # Maintains order for getValidRoots
     rootSet: HashSet[MerkleNode] # O(1) lookup for containsRoot
     windowSize: int
+    # Guards validRoots/rootSet against the cross-thread race: the host pushes
+    # proofs (resetRoots + re-add) from the Qt thread via setCachedProof while
+    # the libp2p thread reads the window during proof verification. Without it a
+    # reader can observe a half-rebuilt tracker. Uncontended (a no-op cost) in
+    # the single-threaded offchain path.
+    lock: Lock
 
   # Abstract base class for group managers
   GroupManager* = ref object of RootObj
@@ -90,43 +96,71 @@ proc newMerkleRootTracker*(
     windowSize: int = AcceptableRootWindowSize
 ): MerkleRootTracker =
   ## Create a new Merkle root tracker.
-  MerkleRootTracker(
+  result = MerkleRootTracker(
     validRoots: initDeque[MerkleNode](),
     rootSet: initHashSet[MerkleNode](),
     windowSize: windowSize,
   )
+  result.lock.initLock()
 
-proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
-  ## Add a new root to the tracker, removing oldest if at capacity.
+proc addRootUnlocked(tracker: MerkleRootTracker, root: MerkleNode) =
+  ## Caller must hold tracker.lock.
   if tracker.validRoots.len >= tracker.windowSize:
     let oldRoot = tracker.validRoots.popFirst()
     tracker.rootSet.excl(oldRoot)
   tracker.validRoots.addLast(root)
   tracker.rootSet.incl(root)
 
-proc resetRoots*(tracker: MerkleRootTracker) =
-  ## Drop all tracked roots.
+proc resetRootsUnlocked(tracker: MerkleRootTracker) =
+  ## Caller must hold tracker.lock.
   tracker.validRoots = initDeque[MerkleNode]()
   tracker.rootSet = initHashSet[MerkleNode]()
 
+proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
+  ## Add a new root to the tracker, removing oldest if at capacity.
+  withLock tracker.lock:
+    tracker.addRootUnlocked(root)
+
+proc resetRoots*(tracker: MerkleRootTracker) =
+  ## Drop all tracked roots.
+  withLock tracker.lock:
+    tracker.resetRootsUnlocked()
+
 proc resetToRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
   ## Replace the valid root window with a single root.
-  tracker.resetRoots()
-  tracker.addRoot(root)
+  withLock tracker.lock:
+    tracker.resetRootsUnlocked()
+    tracker.addRootUnlocked(root)
+
+proc rebuildRoots*(
+    tracker: MerkleRootTracker, roots: openArray[MerkleNode], ensureRoot: MerkleNode
+) =
+  ## Atomically replace the window with `roots`, guaranteeing `ensureRoot` is
+  ## present. Done under a single lock acquisition so a concurrent reader never
+  ## observes a half-rebuilt window (the cross-thread setCachedProof race).
+  withLock tracker.lock:
+    tracker.resetRootsUnlocked()
+    for r in roots:
+      tracker.addRootUnlocked(r)
+    if ensureRoot notin tracker.rootSet:
+      tracker.addRootUnlocked(ensureRoot)
 
 proc hasRoots*(tracker: MerkleRootTracker): bool =
   ## Check if the tracker has any valid roots.
-  tracker.rootSet.len > 0
+  withLock tracker.lock:
+    result = tracker.rootSet.len > 0
 
 proc containsRoot*(tracker: MerkleRootTracker, root: MerkleNode): bool =
   ## Check if a root is in the valid window. O(1) lookup.
-  root in tracker.rootSet
+  withLock tracker.lock:
+    result = root in tracker.rootSet
 
 proc getValidRoots*(tracker: MerkleRootTracker): seq[MerkleNode] =
   ## Get all valid roots.
-  result = newSeq[MerkleNode](tracker.validRoots.len)
-  for i, r in tracker.validRoots:
-    result[i] = r
+  withLock tracker.lock:
+    result = newSeq[MerkleNode](tracker.validRoots.len)
+    for i, r in tracker.validRoots:
+      result[i] = r
 
 proc updateFromInstance*(
     tracker: MerkleRootTracker, instance: RLNInstance

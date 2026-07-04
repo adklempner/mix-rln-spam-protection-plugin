@@ -15,11 +15,14 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used directly for protobuf/minprotobuf and varint
-requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
+# nim-libp2p — used directly for protobuf/minprotobuf and varint. Pinned to
+# the SAME rev libp2p_mix (feat/mix-cbind) depends on so a single nim-libp2p
+# is in the build and there are no "Two SpamProtection candidates" conflicts.
+requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
 
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
-requires "https://github.com/adklempner/nim-libp2p-mix.git#48b2e3b"
+# libp2p_mix — extracted mix package, now carrying the resurrected mix cbind
+# + the generic spam-protection factory hook this plugin registers into.
+requires "https://github.com/adklempner/nim-libp2p-mix.git#feat/mix-cbind"
 
 # Tasks
 task test, "Run tests":
