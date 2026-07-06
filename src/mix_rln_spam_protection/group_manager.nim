@@ -97,7 +97,12 @@ proc newMerkleRootTracker*(
   )
 
 proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
-  ## Add a new root to the tracker, removing oldest if at capacity.
+  ## Add a new root to the tracker, removing oldest if at capacity. Dedup:
+  ## re-adding a tracked root must not evict a distinct older root, or a
+  ## later eviction of the first copy would excl the set entry while a copy
+  ## remains in the deque (window shrink + false-negative containsRoot).
+  if root in tracker.rootSet:
+    return
   if tracker.validRoots.len >= tracker.windowSize:
     let oldRoot = tracker.validRoots.popFirst()
     tracker.rootSet.excl(oldRoot)
@@ -211,6 +216,13 @@ method withdraw*(
 ): Future[RlnResult[void]] {.base, async.} =
   ## Remove a member at the given index.
   return err("withdraw must be implemented by concrete type")
+
+method awaitRootRefresh*(
+    gm: GroupManager, root: MerkleNode
+): Future[bool] {.base, async: (raises: [CancelledError]).} =
+  ## Request an on-demand valid-roots refresh from the backend and wait for
+  ## `root` to enter the window. Default backends have no refresh source.
+  return false
 
 {.push raises: [], gcsafe.}
 

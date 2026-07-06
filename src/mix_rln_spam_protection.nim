@@ -67,7 +67,7 @@
 ##
 ## - `proofSize` - Field set to 288 (fixed RLN proof size)
 ## - `generateProof(bindingData): Result[EncodedProofData, string]` - Generate proof bound to sphinx packet
-## - `verifyProof(encodedProofData, bindingData): Result[bool, string]` - Verify proof and check for spam
+## - `verifyProof(encodedProofData, bindingData): Future[Result[bool, string]]` - Verify proof and check for spam (async: may await an on-demand valid-roots refresh on a root-window miss)
 
 import
   ./mix_rln_spam_protection/[

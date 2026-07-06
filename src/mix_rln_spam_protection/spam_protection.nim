@@ -579,12 +579,14 @@ proc handleSpamDetected(
 
 method verifyProof*(
     sp: MixRlnSpamProtection, encodedProofData: seq[byte], bindingData: seq[byte]
-): Result[bool, string] {.gcsafe, raises: [].} =
+): Future[Result[bool, string]] {.async: (raises: [CancelledError]).} =
   ## Verify an RLN proof and check for spam.
   ##
   ## This performs:
   ## 1. Epoch validation (within acceptable gap)
-  ## 2. Merkle root validation (in valid roots window)
+  ## 2. Merkle root validation (in valid roots window), with an on-demand
+  ##    host roots refresh on a window miss (bounded await, packet is saved
+  ##    rather than dropped when the refresh recovers the root)
   ## 3. zkSNARK proof verification
   ## 4. Nullifier check for spam/duplicate detection
 
@@ -611,9 +613,18 @@ method verifyProof*(
   # Check Merkle root validity (skip if rootTracker has no roots yet)
   if sp.groupManager.rootTracker.hasRoots():
     if not sp.groupManager.validateRoot(proof.merkleRoot):
-      debug "Proof rejected: invalid Merkle root",
+      # The proof may reference a root that just advanced past our window
+      # (a registration landed between host pushes). Ask the backend for a
+      # fresh on-chain read and re-check instead of dropping the packet.
+      info "Root miss - requesting on-demand valid-roots refresh",
         proofRoot = proof.merkleRoot.toHex()
-      return ok(false)
+      if await sp.groupManager.awaitRootRefresh(proof.merkleRoot):
+        info "On-demand root refresh recovered proof root",
+          proofRoot = proof.merkleRoot.toHex()
+      else:
+        debug "Proof rejected: invalid Merkle root after on-demand refresh",
+          proofRoot = proof.merkleRoot.toHex()
+        return ok(false)
   else:
     debug "Root validation skipped (no valid roots fetched yet)"
     # Temporarily add the proof's root so zerokit verification can proceed.
