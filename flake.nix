@@ -11,7 +11,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     libp2p_mix = {
-      url = "git+file:///Users/arseniy/Waku/Logos/nim-libp2p-mix?ref=rebase/mix-cbind";
+      url = "git+file:///Users/arseniy/Waku/Logos/nim-libp2p-mix?ref=feat/on-demand-roots";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     logos_rln_gifter = {

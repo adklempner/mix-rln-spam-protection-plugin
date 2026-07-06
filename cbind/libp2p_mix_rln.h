@@ -58,6 +58,24 @@ int libp2p_mix_rln_set_identity(const uint8_t *id_secret_hash, size_t len,
 // unparseable proof — caller retries until the membership lands in the tree).
 int libp2p_mix_rln_set_cached_proof(const char *proof_json);
 
+// Host callback invoked FROM THE LIBP2P THREAD when proof verification
+// misses the valid-roots window and requests a fresh on-chain read. It must
+// ONLY set a host-side flag and return — any blocking or cross-module call
+// here stalls the chronos loop (and QtRO calls deadlock). The host performs
+// the read on its own thread and answers via libp2p_mix_rln_set_valid_roots.
+typedef void (*Libp2pMixRlnRefreshRequester)(void *user_data);
+
+// Install the refresh requester. Returns 0 on success.
+int libp2p_mix_rln_set_refresh_requester(Libp2pMixRlnRefreshRequester fn,
+                                         void *user_data);
+
+// Push a fresh valid-roots read (JSON array of 32-byte hex strings, newest
+// first — get_valid_roots output verbatim) into the root tracker. Call from
+// the host's own (Qt) thread. Returns 0 on success, 1 on failure (unparseable
+// or empty — transient failures are fine, the verifier re-requests after its
+// throttle interval).
+int libp2p_mix_rln_set_valid_roots(const char *roots_json);
+
 // 1 if the group manager can generate proofs (membership confirmed and a
 // merkle proof cached), else 0.
 int libp2p_mix_rln_is_ready(void);

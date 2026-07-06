@@ -56,6 +56,13 @@ proc enableConfig(): cstring =
     "\"epochDurationSeconds\":10.0,\"configAccount\":\"testacct\"}"
   )
 
+var requesterHits = 0
+
+# Stub refresh requester: like the host trampoline, it only flips state — no
+# blocking work on the (simulated) libp2p thread.
+proc stubRequester(userData: pointer) {.cdecl, gcsafe, raises: [].} =
+  inc requesterHits
+
 suite "mix-rln cbind C surface":
   test "set_fetcher + callFetcher trampoline round-trip":
     check libp2p_mix_rln_set_fetcher(stubFetcher, nil) == 0
@@ -108,6 +115,44 @@ suite "mix-rln cbind C surface":
     check libp2p_mix_rln_start_polling() == 0
     waitFor sleepAsync(400.milliseconds)
     check libp2p_mix_rln_is_ready() == 1
+
+  test "set_valid_roots lands a host roots push in the tracker":
+    check libp2p_mix_rln_enable(enableConfig()) == 0
+    let spOpt = makeSpamProtection()
+    check spOpt.isSome
+    let gm = OnchainLEZGroupManager(MixRlnSpamProtection(spOpt.get()).groupManager)
+
+    check libp2p_mix_rln_set_valid_roots(cstring(RootsJson)) == 0
+    let expected = parseRoots(RootsJson).get()
+    check gm.rootTracker.containsRoot(expected[0])
+    check gm.rootTracker.containsRoot(expected[1])
+
+  test "refresh requester fires on a root miss; set_valid_roots recovers it":
+    check libp2p_mix_rln_enable(enableConfig()) == 0
+    check libp2p_mix_rln_set_refresh_requester(stubRequester, nil) == 0
+    requesterHits = 0
+
+    # Local async scope so the closures capture locals, not test-body globals.
+    proc missScenario(): Future[(bool, int)] {.async.} =
+      let spOpt = makeSpamProtection()
+      if spOpt.isNone:
+        return (false, -1)
+      let gm = OnchainLEZGroupManager(MixRlnSpamProtection(spOpt.get()).groupManager)
+
+      const missingJson = "[\"" & PathElem & "\"]"
+      let missing = parseRoots(missingJson).get()[0]
+
+      proc hostAnswers() {.async.} =
+        await sleepAsync(150.milliseconds)
+        discard libp2p_mix_rln_set_valid_roots(cstring(missingJson))
+
+      asyncSpawn hostAnswers()
+      let recovered = await gm.awaitRootRefresh(missing)
+      return (recovered, requesterHits)
+
+    let (recovered, hits) = waitFor missScenario()
+    check recovered
+    check hits == 1
 
 when isMainModule:
   discard

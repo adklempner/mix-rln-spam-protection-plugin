@@ -4,6 +4,8 @@
 
 ## Constants for the RLN spam protection plugin.
 
+import chronos
+
 const
   # Merkle tree configuration
   MerkleTreeDepth* = 20
@@ -36,6 +38,20 @@ const
   AcceptableRootWindowSize* = 5
     ## Number of past Merkle roots to keep for validation.
     ## Allows verification against slightly stale roots due to propagation delay.
+
+  # On-demand valid-roots refresh (triggered by a root-window miss in verifyProof)
+  RootsRefreshMinInterval* = 2.seconds
+    ## Minimum spacing between host refresh requests. Bounds attacker-forced
+    ## account reads (unverified proofs trigger the refresh) to 0.5/s per node.
+
+  RootsRefreshAwaitTimeout* = 3.seconds
+    ## How long a verifier waits for a requested refresh to land before
+    ## rejecting the proof. Covers the host's 200ms drain tick + one sequencer
+    ## account read with margin, and keeps the libp2p side well under the
+    ## host's own QtRO call timeout.
+
+  RootsRefreshPollInterval* = 50.milliseconds
+    ## Poll cadence while awaiting a refresh to reach the root tracker.
 
   # Content topics for coordination layer
   MembershipContentTopic* = "/mix/rln/membership/v1"

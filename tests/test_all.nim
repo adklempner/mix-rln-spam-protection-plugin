@@ -23,6 +23,7 @@ import ../src/mix_rln_spam_protection/constants
 import ../src/mix_rln_spam_protection/codec
 import ../src/mix_rln_spam_protection/nullifier_log
 import ../src/mix_rln_spam_protection/rln_interface
+import ../src/mix_rln_spam_protection/onchain_group_manager
 import libp2p_mix/spam_protection as libp2p_spam
 
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
@@ -611,12 +612,12 @@ suite "Spam Detection and Secret Recovery":
     let proofBytes = proofResult.get().proof
 
     # Verify the proof
-    let verifyResult = sp.verifyProof(proofBytes, bindingData)
+    let verifyResult = waitFor sp.verifyProof(proofBytes, bindingData)
     check verifyResult.isOk
     check verifyResult.get() == true
 
     # Same proof verified again should be detected as duplicate
-    let verifyResult2 = sp.verifyProof(proofBytes, bindingData)
+    let verifyResult2 = waitFor sp.verifyProof(proofBytes, bindingData)
     check verifyResult2.isOk
     check verifyResult2.get() == false  # Duplicate should return false
 
@@ -750,6 +751,121 @@ suite "Partial Proof Cache and Root Tracking":
 
     check not targetGm.validateRoot(emptyRoot.get())
     check targetGm.validateRoot(snapshotRoot.get())
+
+  test "Root tracker deduplicates re-added roots":
+    proc mkRoot(b: byte): MerkleNode =
+      result[0] = b
+
+    let tracker = newMerkleRootTracker(windowSize = 3)
+    tracker.addRoot(mkRoot(1))
+    tracker.addRoot(mkRoot(2))
+    tracker.addRoot(mkRoot(3))
+
+    # Re-adding a tracked root must be a no-op: without dedup it appends a
+    # duplicate deque entry and evicts a distinct older root, and the later
+    # eviction of the first copy excls the set entry while a copy remains in
+    # the deque (false-negative containsRoot).
+    tracker.addRoot(mkRoot(2))
+    check tracker.getValidRoots().len == 3
+    tracker.addRoot(mkRoot(4))
+    check not tracker.containsRoot(mkRoot(1))
+    check tracker.containsRoot(mkRoot(2))
+    check tracker.containsRoot(mkRoot(3))
+    check tracker.containsRoot(mkRoot(4))
+
+suite "On-demand Root Refresh":
+  proc mkRoot(b: byte): MerkleNode =
+    result[0] = b
+
+  proc newLezGm(): OnchainLEZGroupManager =
+    let rlnInstance = newRLNInstance()
+    doAssert rlnInstance.isOk
+    OnchainLEZGroupManager.new(rlnInstance.get())
+
+  test "awaitRootRefresh recovers a root delivered by the host":
+    # Scenario runs inside a local async proc: unittest test bodies are
+    # top-level, so closures over test-scope lets are not gcsafe.
+    proc recoverScenario(): Future[(bool, int, bool)] {.async.} =
+      let gm = newLezGm()
+      var requests = 0
+      gm.setHostRefreshRequester(
+        proc() {.gcsafe, raises: [].} =
+          inc requests
+      )
+      gm.rootTracker.addRoot(mkRoot(1))
+      let missing = mkRoot(2)
+
+      proc hostAnswers() {.async.} =
+        await sleepAsync(150.milliseconds)
+        gm.applyHostRoots(@[missing, mkRoot(1)])
+
+      asyncSpawn hostAnswers()
+      let recovered = await gm.awaitRootRefresh(missing)
+      return (recovered, requests, gm.rootTracker.containsRoot(missing))
+
+    let (recovered, requests, containsMissing) = waitFor recoverScenario()
+    check recovered
+    check requests == 1
+    check containsMissing
+
+  test "concurrent misses coalesce into a single host request":
+    proc coalesceScenario(): Future[(bool, bool, int)] {.async.} =
+      let gm = newLezGm()
+      var requests = 0
+      gm.setHostRefreshRequester(
+        proc() {.gcsafe, raises: [].} =
+          inc requests
+      )
+      let missing = mkRoot(7)
+      let f1 = gm.awaitRootRefresh(missing)
+      let f2 = gm.awaitRootRefresh(missing)
+      await sleepAsync(150.milliseconds)
+      gm.applyHostRoots(@[missing])
+      return (await f1, await f2, requests)
+
+    let (r1, r2, requests) = waitFor coalesceScenario()
+    check r1 and r2
+    check requests == 1
+
+  test "a second miss inside the throttle window is skipped":
+    proc throttleScenario(): Future[(bool, bool, int)] {.async.} =
+      let gm = newLezGm()
+      var requests = 0
+      gm.setHostRefreshRequester(
+        proc() {.gcsafe, raises: [].} =
+          inc requests
+      )
+      let first = mkRoot(3)
+
+      proc hostAnswers() {.async.} =
+        await sleepAsync(100.milliseconds)
+        gm.applyHostRoots(@[first])
+
+      asyncSpawn hostAnswers()
+      let firstRecovered = await gm.awaitRootRefresh(first)
+      # Immediately after, a different unknown root must be throttle-skipped
+      # (no second host request, immediate rejection).
+      let secondRecovered = await gm.awaitRootRefresh(mkRoot(4))
+      return (firstRecovered, secondRecovered, requests)
+
+    let (firstRecovered, secondRecovered, requests) = waitFor throttleScenario()
+    check firstRecovered
+    check not secondRecovered
+    check requests == 1
+
+  test "applyHostRoots keeps the node's own cached-proof root":
+    let gm = newLezGm()
+    let ownRoot = mkRoot(9)
+    gm.setCachedProof(
+      ExternalMerkleProof(root: ownRoot, validRoots: @[ownRoot])
+    )
+
+    # A host refresh that no longer includes our proof root must not evict it
+    # (self-verification of our next generated proof depends on it).
+    gm.applyHostRoots(@[mkRoot(5), mkRoot(4)])
+    check gm.rootTracker.containsRoot(ownRoot)
+    check gm.rootTracker.containsRoot(mkRoot(5))
+    check gm.rootTracker.containsRoot(mkRoot(4))
 
 suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":

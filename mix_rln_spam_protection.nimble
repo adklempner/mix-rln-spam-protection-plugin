@@ -22,7 +22,7 @@ requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1
 
 # libp2p_mix — extracted mix package, now carrying the resurrected mix cbind
 # + the generic spam-protection factory hook this plugin registers into.
-requires "https://github.com/adklempner/nim-libp2p-mix.git#feat/mix-cbind"
+requires "https://github.com/adklempner/nim-libp2p-mix.git#feat/on-demand-roots"
 
 # Tasks
 task test, "Run tests":

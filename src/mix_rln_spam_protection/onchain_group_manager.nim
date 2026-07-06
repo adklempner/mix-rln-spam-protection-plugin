@@ -24,6 +24,7 @@ logScope:
 type
   FetchRootsCallback* = proc(): Future[RlnResult[seq[MerkleNode]]] {.gcsafe, raises: [].}
   FetchProofCallback* = proc(index: MembershipIndex): Future[RlnResult[ExternalMerkleProof]] {.gcsafe, raises: [].}
+  HostRefreshRequester* = proc() {.gcsafe, raises: [].}
 
   ExternalMerkleProof* = object
     pathElements*: seq[byte]
@@ -53,6 +54,13 @@ type
     # The rootTracker has its own lock; setCachedProof nests them (stateLock
     # outer) so (cachedProof, rootTracker) update atomically together.
     stateLock: Lock
+    # On-demand roots refresh state. Touched only from the libp2p thread
+    # (chronos is single-threaded there), so no lock: awaitRootRefresh
+    # throttles/coalesces via these, and the requester itself must only set a
+    # host-side flag — the actual fetch happens on the host's own thread.
+    lastRefreshRequest: Moment
+    refreshInFlight: bool
+    hostRefreshRequester: HostRefreshRequester
 
 proc new*(
     T: typedesc[OnchainLEZGroupManager],
@@ -77,6 +85,11 @@ proc setFetchCallbacks*(
 ) =
   gm.fetchRoots = fetchRoots
   gm.fetchProof = fetchProof
+
+proc setHostRefreshRequester*(
+    gm: OnchainLEZGroupManager, requester: HostRefreshRequester
+) =
+  gm.hostRefreshRequester = requester
 
 proc pollLoop(gm: OnchainLEZGroupManager) {.async.}
   # forward declaration
@@ -116,6 +129,28 @@ proc setCachedProof*(gm: OnchainLEZGroupManager, p: ExternalMerkleProof) =
     gm.cachedProof = some(p)
     gm.rootTracker.rebuildRoots(p.validRoots, p.root)
 
+proc applyHostRoots*(
+    gm: OnchainLEZGroupManager, rootsNewestFirst: openArray[MerkleNode]
+) =
+  ## Replace the root window with a fresh on-chain roots read pushed by the
+  ## host (Qt thread) in response to a refresh request. get_valid_roots
+  ## returns newest-first (current root, then history newest-at-[0]) —
+  ## reversed here so any over-capacity eviction in rebuildRoots drops the
+  ## actual oldest. ensureRoot pins our own cachedProof root so a rebuild can
+  ## never invalidate self-verification of our next generated proof.
+  if rootsNewestFirst.len == 0:
+    return
+  var oldestFirst = newSeq[MerkleNode](rootsNewestFirst.len)
+  for i in 0 ..< rootsNewestFirst.len:
+    oldestFirst[rootsNewestFirst.len - 1 - i] = rootsNewestFirst[i]
+  withLock gm.stateLock:
+    let ensure =
+      if gm.cachedProof.isSome:
+        gm.cachedProof.get().root
+      else:
+        rootsNewestFirst[0]
+    gm.rootTracker.rebuildRoots(oldestFirst, ensure)
+
 proc setCredential*(
     gm: OnchainLEZGroupManager, idSecretHash: IDSecretHash, leaf: int64
 ) =
@@ -145,6 +180,41 @@ method withdraw*(
     gm: OnchainLEZGroupManager, index: MembershipIndex
 ): Future[RlnResult[void]] {.async.} =
   return err("Withdrawal not supported for on-chain LEZ group manager")
+
+method awaitRootRefresh*(
+    gm: OnchainLEZGroupManager, root: MerkleNode
+): Future[bool] {.async: (raises: [CancelledError]).} =
+  ## Root-window miss recovery: ask the host for a fresh valid-roots read
+  ## (throttled, coalesced) and wait for `root` to enter the window. Only the
+  ## initiator stamps the throttle and clears the in-flight flag; concurrent
+  ## verifiers join the same wait instead of issuing another request.
+  if gm.rootTracker.containsRoot(root):
+    return true
+  if gm.hostRefreshRequester.isNil:
+    return false
+
+  var initiator = false
+  if not gm.refreshInFlight:
+    let now = Moment.now()
+    if now - gm.lastRefreshRequest < RootsRefreshMinInterval:
+      debug "Root refresh throttled",
+        sinceLastRequestMs = (now - gm.lastRefreshRequest).milliseconds
+      return false
+    gm.lastRefreshRequest = now
+    gm.refreshInFlight = true
+    initiator = true
+    gm.hostRefreshRequester()
+
+  try:
+    let deadline = Moment.now() + RootsRefreshAwaitTimeout
+    while Moment.now() < deadline:
+      await sleepAsync(RootsRefreshPollInterval)
+      if gm.rootTracker.containsRoot(root):
+        return true
+    return false
+  finally:
+    if initiator:
+      gm.refreshInFlight = false
 
 {.push raises: [], gcsafe.}
 

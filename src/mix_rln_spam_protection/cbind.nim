@@ -44,6 +44,8 @@ type
     fetcherData: pointer,
   ): cint {.cdecl, gcsafe, raises: [].}
 
+  RlnRefreshRequesterFunc* = proc(userData: pointer) {.cdecl, gcsafe, raises: [].}
+
 const ConfigAccountCap = 64
   ## base58 config-account id fits in 44 chars; fixed buffer keeps the
   ## lock-protected global off the GC heap for cross-thread reads.
@@ -52,6 +54,8 @@ var
   stateLock: Lock
   fetcher: RlnFetcherFunc = nil
   fetcherData: pointer = nil
+  refreshRequester: RlnRefreshRequesterFunc = nil
+  refreshRequesterData: pointer = nil
   configAccountBuf: array[ConfigAccountCap, char]
   configAccountLen: int = 0
   leafIndex: int64 = -1
@@ -196,6 +200,19 @@ proc makeFetchRoots(): FetchRootsCallback =
       return err(rootsJson.error)
     parseRoots(rootsJson.get())
 
+proc makeHostRefreshRequester(): HostRefreshRequester =
+  ## Runs on the libp2p thread inside awaitRootRefresh. The host callback must
+  ## only set a flag — its drain timer does the actual read on the Qt thread
+  ## and answers via libp2p_mix_rln_set_valid_roots.
+  return proc() {.gcsafe, raises: [].} =
+    {.gcsafe.}:
+      stateLock.acquire()
+      let fn = refreshRequester
+      let data = refreshRequesterData
+      stateLock.release()
+    if not fn.isNil:
+      fn(data)
+
 proc makeFetchProof(): FetchProofCallback =
   return proc(
       index: MembershipIndex
@@ -261,6 +278,7 @@ proc spamFactory(): Opt[libp2p_spam.SpamProtection] {.gcsafe, nimcall, raises: [
   if cfg.useOnchainLEZ and sp.groupManager of OnchainLEZGroupManager:
     let gm = OnchainLEZGroupManager(sp.groupManager)
     gm.setFetchCallbacks(makeFetchRoots(), makeFetchProof())
+    gm.setHostRefreshRequester(makeHostRefreshRequester())
     {.gcsafe.}:
       stateLock.acquire()
       groupManager = cast[pointer](gm)
@@ -398,6 +416,46 @@ proc libp2p_mix_rln_set_cached_proof*(
     return 1
   let gm = cast[OnchainLEZGroupManager](gmPtr)
   gm.setCachedProof(parsed.get())
+  return 0
+
+proc libp2p_mix_rln_set_refresh_requester*(
+    fn: RlnRefreshRequesterFunc, userData: pointer
+): cint {.dynlib, exportc, cdecl.} =
+  ## Install the host callback invoked (on the libp2p thread) when proof
+  ## verification misses the root window and requests a fresh valid-roots
+  ## read. The callback must ONLY set a host-side flag; the host performs the
+  ## read on its own (Qt) thread and answers via libp2p_mix_rln_set_valid_roots.
+  mixCbindInitializeLibrary()
+  {.gcsafe.}:
+    stateLock.acquire()
+    refreshRequester = fn
+    refreshRequesterData = userData
+    stateLock.release()
+  return 0
+
+proc libp2p_mix_rln_set_valid_roots*(
+    rootsJson: cstring
+): cint {.dynlib, exportc, cdecl.} =
+  ## Push a fresh valid-roots read (JSON array of 32-byte hex strings, newest
+  ## first — get_valid_roots output verbatim) into the root tracker. Called
+  ## from the host's (Qt) thread; applyHostRoots locks against libp2p-thread
+  ## readers. Returns 0 on success, 1 on failure (no GM / unparseable / empty
+  ## — transient failures are fine, the verifier re-requests after its
+  ## throttle interval).
+  mixCbindInitializeLibrary()
+  if rootsJson.isNil:
+    return 1
+  {.gcsafe.}:
+    stateLock.acquire()
+    let gmPtr = groupManager
+    stateLock.release()
+  if gmPtr.isNil:
+    return 1
+  let roots = parseRoots($rootsJson)
+  if roots.isErr or roots.get().len == 0:
+    return 1
+  let gm = cast[OnchainLEZGroupManager](gmPtr)
+  gm.applyHostRoots(roots.get())
   return 0
 
 proc libp2p_mix_rln_is_ready*(): cint {.dynlib, exportc, cdecl.} =
