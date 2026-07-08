@@ -266,6 +266,10 @@ proc membershipConfirmedAt*(gm: OnchainLEZGroupManager): Option[Moment] =
 {.pop.}
 
 proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
+  # The fetchRoots/fetchProof calls below use a synchronous FFI trip that
+  # can't yield. Delay the first tick so late consumers (e.g. QtRO replica
+  # acquirers) get a window to subscribe before the loop starts blocking.
+  await sleepAsync(60.seconds)
   while gm.isSynced:
     # Fetch the most recent valid roots from LEZ. When this node has a
     # membership we don't apply them yet — (cachedProof, validRoots) must
@@ -310,4 +314,5 @@ proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
       else:
         debug "Failed to fetch merkle proof from LEZ", error = proofResult.error
 
+    # Sleep between iterations to bound the load on the RLN module.
     await sleepAsync(gm.pollInterval)
