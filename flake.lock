@@ -7,16 +7,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1783358346,
-        "narHash": "sha256-KRuk2WM7VhfGnTwvNl3KHsMbqP6Xri4ACaeUQD70wCI=",
-        "ref": "feat/on-demand-roots",
-        "rev": "a93112306d6001faa745149d0756652c05bf9933",
-        "revCount": 91,
+        "lastModified": 1783127842,
+        "narHash": "sha256-ZiL68mRuCOddqG93UZp41Ztht29SfQPC2LI07UElvao=",
+        "ref": "rebase/mix-cbind",
+        "rev": "54e61254b0fb11400b92b304c52108145a2248d6",
+        "revCount": 90,
         "type": "git",
         "url": "file:///Users/arseniy/Waku/Logos/nim-libp2p-mix"
       },
       "original": {
-        "ref": "feat/on-demand-roots",
+        "ref": "rebase/mix-cbind",
         "type": "git",
         "url": "file:///Users/arseniy/Waku/Logos/nim-libp2p-mix"
       }
