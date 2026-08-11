@@ -679,7 +679,26 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
 proc computeExternalNullifier*(
     epoch: Epoch, rlnIdentifier: RlnIdentifier
 ): RlnResult[ExternalNullifier] {.gcsafe.} =
-  poseidonPairLe(epoch, rlnIdentifier)
+  # poseidon(hash_to_field_le(epoch), hash_to_field_le(rln_identifier)) — the
+  # construction liblogos_rln_module and logos-delivery share. The external
+  # nullifier is a circuit public input: a raw-field-decode variant produces
+  # proofs that fail closed against module-generated ones with no diagnostic
+  # beyond invalid_proof. computeRateCommitment stays raw-decode — that is the
+  # chain's leaf construction.
+  let epochPtr = hashToFieldLe(epoch).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(epochPtr)
+  let idPtr = hashToFieldLe(rlnIdentifier).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(idPtr)
+  let res = ffi_poseidon_hash_pair(epochPtr, idPtr)
+  if res.ok.isNil:
+    return err(consumeError("Poseidon hash failed: ", res.err))
+  defer:
+    ffi_cfr_free(res.ok)
+  cfrToBytesLe(res.ok)
 
 proc computeRateCommitment*(
     idCommitment: IDCommitment, userMessageLimit: uint64
