@@ -2,3 +2,4 @@ build/
 nimcache_rln/
 nimcache/
 *.dylib
+tests/interop/test_module_interop
